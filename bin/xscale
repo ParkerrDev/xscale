@@ -1,0 +1,226 @@
+#!/bin/bash
+# xscale: X11 apps as sharp as Wayland ones, at the right size on every monitor.
+#
+#   xscale status      what is installed and what the running session does
+#   xscale settings    tell X11 toolkits the scale they render at: the X
+#                      resources (Xft.dpi, Xcursor.size) and XSETTINGS (GTK),
+#                      on the running X display; run at every login by
+#                      hypr/xscale.lua
+#   xscale build       build the patched Hyprland and Xwayland packages from
+#                      Arch's recipes (pkg/) and the patches (patches/), in
+#                      build/pkg; needs no root
+#   xscale install     install what `xscale build` made (sudo pacman -U); the
+#                      new Hyprland takes over at the next login
+#   xscale restore     put Arch's own Hyprland and Xwayland back
+#
+# X11 has one coordinate space and one DPI for all its clients, so X11 apps
+# render at one scale, the highest monitor's, and are shown at their logical
+# size on every monitor. With xscale's Xwayland, Xwayland does that itself
+# (xwayland_shell_v1 version 2, the scale event); with Arch's, Hyprland does.
+set -euo pipefail
+
+ROOT=$(dirname "$(dirname "$(readlink -f "$0")")")
+CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/xscale
+BUILD=$ROOT/build/pkg
+MARKER=/usr/share/hypr/xwayland-scale
+
+usage() {
+  awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
+}
+
+die() {
+  echo "xscale: $*" >&2
+  exit 1
+}
+
+# The scale X11 clients render at in this session: xwayland:scale as Hyprland
+# resolves it (-1 the highest monitor scale rounded up, -2 as it is), or, on a
+# Hyprland without it, the highest monitor scale under force_zero_scaling and 1
+# otherwise.
+x11_scale() {
+  local monitors highest option fzs
+  monitors=$(hyprctl monitors -j 2>/dev/null) || die "no Hyprland to ask"
+  highest=$(jq -r '[.[].scale] + [1] | max' <<<"$monitors")
+  # a Hyprland without xscale's patch has no such option
+  option=$(hyprctl getoption xwayland:scale -j 2>/dev/null | jq -r '.float // empty' 2>/dev/null || true)
+  if [ -n "$option" ]; then
+    awk -v s="$option" -v h="$highest" 'BEGIN {
+      if (s == 0) { print 0; exit }
+      if (s < -1.5) { v = h } else if (s < 0) { v = int(h - 0.001); if (v < h - 0.001) v += 1 } else { v = s }
+      v = int(v * 120 + 0.5) / 120
+      if (v < 1) v = 1
+      print v
+    }'
+    return
+  fi
+  fzs=$(hyprctl getoption xwayland:force_zero_scaling -j 2>/dev/null | jq -r 'if .bool == true or .int == 1 then 1 else 0 end')
+  if [ "$fzs" = 1 ]; then echo "$highest"; else echo 1; fi
+}
+
+# The X display of this session's Xwayland: DISPLAY, or the Xwayland the
+# running Hyprland started (at login DISPLAY may not be set yet).
+x11_display() {
+  local hypr pid parent
+  if [ -n "${DISPLAY:-}" ]; then
+    echo "$DISPLAY"
+    return
+  fi
+  hypr=$(hyprctl instances -j 2>/dev/null | jq -r --arg s "${HYPRLAND_INSTANCE_SIGNATURE:-}" '.[] | select(.instance == $s) | .pid' | head -1)
+  [ -n "$hypr" ] || return 1
+  for pid in $(pgrep -x Xwayland); do
+    parent=$(ps -o ppid= -p "$pid" | tr -d ' ')
+    if [ "$parent" = "$hypr" ]; then
+      tr '\0' '\n' <"/proc/$pid/cmdline" | sed -n 2p
+      return
+    fi
+  done
+  return 1
+}
+
+# Text settings of the Wayland side, so that X11 GTK apps look the same
+gsetting() {
+  command -v gsettings >/dev/null || return 0
+  gsettings get org.gnome.desktop.interface "$1" 2>/dev/null | sed "s/^'//; s/'\$//"
+}
+
+write_settings() {
+  local scale=$1 gdk dpi unscaled cursor theme icons font gtk
+  # GTK only scales by whole numbers: a fractional scale leaves GTK at the
+  # whole part and scales its text by the rest
+  gdk=$(awk -v s="$scale" 'BEGIN { v = int(s + 0.001); print (v < 1 ? 1 : v) }')
+  dpi=$(awk -v s="$scale" 'BEGIN { printf "%d", 96 * s + 0.5 }')
+  unscaled=$(awk -v s="$scale" -v g="$gdk" 'BEGIN { printf "%d", 96 * 1024 * s / g + 0.5 }')
+  cursor=$(awk -v s="$scale" 'BEGIN { printf "%d", 24 * s + 0.5 }')
+  theme=${XCURSOR_THEME:-$(gsetting cursor-theme)}
+  icons=$(gsetting icon-theme)
+  font=$(gsetting font-name)
+  gtk=$(gsetting gtk-theme)
+
+  mkdir -p "$CONFIG"
+  {
+    echo "! written by xscale settings for an X11 scale of $scale"
+    echo "Xft.dpi: $dpi"
+    echo "Xcursor.size: $cursor"
+    [ -n "$theme" ] && echo "Xcursor.theme: $theme"
+  } >"$CONFIG/Xresources"
+  {
+    echo "# written by xscale settings for an X11 scale of $scale"
+    echo "Gdk/WindowScalingFactor $gdk"
+    echo "Gdk/UnscaledDPI $unscaled"
+    echo "Xft/DPI $((dpi * 1024))"
+    echo "Gtk/CursorThemeSize 24"
+    [ -n "$theme" ] && echo "Gtk/CursorThemeName \"$theme\""
+    [ -n "$icons" ] && echo "Net/IconThemeName \"$icons\""
+    [ -n "$font" ] && echo "Gtk/FontName \"$font\""
+    [ -n "$gtk" ] && echo "Net/ThemeName \"$gtk\""
+  } >"$CONFIG/xsettingsd.conf"
+}
+
+cmd_settings() {
+  local scale display tries pidfile pid
+  scale=$(x11_scale)
+  [ "$scale" = 0 ] && scale=1
+  write_settings "$scale"
+
+  # Xwayland comes up a moment after Hyprland: wait for it, at most 15 s
+  display=
+  for tries in $(seq 1 30); do
+    display=$(x11_display) && [ -n "$display" ] && break
+    sleep 0.5
+  done
+  [ -n "$display" ] || die "no X display yet (is Xwayland on?)"
+  : "$tries"
+
+  DISPLAY=$display xrdb -merge "$CONFIG/Xresources"
+
+  if command -v xsettingsd >/dev/null; then
+    pidfile=${XDG_RUNTIME_DIR:-/tmp}/xscale-xsettingsd${display//[^0-9]/}.pid
+    pid=$(cat "$pidfile" 2>/dev/null || true)
+    if [ -n "$pid" ] && [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = xsettingsd ]; then
+      kill -HUP "$pid"
+    else
+      DISPLAY=$display setsid xsettingsd -c "$CONFIG/xsettingsd.conf" >/dev/null 2>&1 &
+      echo $! >"$pidfile"
+    fi
+  else
+    echo "xscale: xsettingsd is not installed, so X11 GTK apps keep a scale of 1 (omarchy pkg add xsettingsd)" >&2
+  fi
+
+  # Steam scales its interface by its own setting
+  hyprctl eval "hl.env(\"STEAM_FORCE_DESKTOPUI_SCALING\", \"$scale\")" >/dev/null 2>&1 || true
+  echo "xscale: X11 apps on $display render at $scale"
+}
+
+pinned() {
+  sed -n "s/^$1=//p" "$ROOT/pkg/$2/PKGBUILD" | head -1
+}
+
+cmd_build() {
+  local name missing
+  command -v makepkg >/dev/null || die "makepkg is needed (base-devel)"
+  for name in hyprland xorg-xwayland; do
+    local installed want
+    installed=$(pacman -Q "$name" 2>/dev/null | awk '{print $2}' | sed 's/-[^-]*$//')
+    want=$(pinned pkgver "$name")
+    if [ -n "$installed" ] && [ "$installed" != "$want" ]; then
+      die "Arch's $name is $installed now, the patch is for $want: pkg/$name and patches/ need refreshing first"
+    fi
+  done
+  missing=$(cd "$ROOT/pkg/hyprland" && pacman -T cmake glaze hyprland-protocols hyprwayland-scanner meson ninja xorgproto \
+    xtrans libxkbfile xorg-font-util wayland-protocols mesa-libgl || true)
+  [ -z "$missing" ] || die "missing build packages: $missing (omarchy pkg add ...)"
+
+  mkdir -p "$BUILD"
+  for name in xorg-xwayland hyprland; do
+    rm -rf "${BUILD:?}/$name"
+    mkdir -p "$BUILD/$name"
+    cp "$ROOT/pkg/$name/PKGBUILD" "$BUILD/$name/"
+    cp "$ROOT"/patches/*.patch "$BUILD/$name/"
+    echo "xscale: building $name"
+    (cd "$BUILD/$name" && makepkg -f --skippgpcheck --noconfirm >"$BUILD/$name.log" 2>&1) ||
+      die "$name did not build, see $BUILD/$name.log"
+  done
+  find "$BUILD" -maxdepth 2 -name '*.pkg.tar.zst' -printf '%p\n'
+}
+
+packages() {
+  find "$BUILD" -maxdepth 2 -name '*.pkg.tar.zst' \( -name 'hyprland-[0-9]*' -o -name 'xorg-xwayland-[0-9]*' \) | sort
+}
+
+cmd_install() {
+  local files
+  mapfile -t files < <(packages)
+  [ "${#files[@]}" -gt 0 ] || die "nothing built yet: xscale build"
+  echo "xscale: installing ${files[*]##*/}"
+  sudo pacman -U "${files[@]}"
+  echo "xscale: log out and back in to use the new Hyprland and Xwayland"
+}
+
+cmd_restore() {
+  echo "xscale: putting Arch's hyprland and xorg-xwayland back"
+  sudo pacman -S hyprland xorg-xwayland
+}
+
+cmd_status() {
+  local hypr xwl scale display
+  hypr=$(pacman -Q hyprland 2>/dev/null || echo "hyprland not installed")
+  xwl=$(pacman -Q xorg-xwayland 2>/dev/null || echo "xorg-xwayland not installed")
+  echo "installed:  $hypr$([ -e "$MARKER" ] && echo ' (xscale)'), $xwl$(case $xwl in *.1) echo ' (xscale)' ;; esac)"
+  if hyprctl version >/dev/null 2>&1; then
+    scale=$(x11_scale)
+    display=$(x11_display || echo none)
+    echo "session:    X11 apps render at $scale on display $display"
+  fi
+  [ -e "$CONFIG/Xresources" ] && echo "settings:   $(grep -v '^!' "$CONFIG/Xresources" | tr '\n' ' ')"
+  return 0
+}
+
+case "${1:-}" in
+  status) cmd_status ;;
+  settings) cmd_settings ;;
+  build) cmd_build ;;
+  install) cmd_install ;;
+  restore) cmd_restore ;;
+  -h | --help | help | "") usage ;;
+  *) usage >&2; exit 2 ;;
+esac
