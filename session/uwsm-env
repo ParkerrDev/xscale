@@ -1,0 +1,12 @@
+# xscale: Steam's interface scale for the whole session, from its start.
+# Launchers hand their own environment to what they start, and they start
+# before Hyprland's config runs, so a variable Hyprland sets later never
+# reaches an app started from Omarchy's menu. `xscale settings` writes the
+# value at every login; this takes the one from the login before.
+# install.sh links this to ~/.config/uwsm/env.d/50-xscale
+xscale_env="${XDG_CONFIG_HOME:-$HOME/.config}/xscale/env"
+if [ -r "$xscale_env" ]; then
+  # shellcheck source=/dev/null
+  . "$xscale_env"
+fi
+unset xscale_env

@@ -4,6 +4,8 @@
 #   ~/.local/bin/xscale                          the command
 #   ~/.config/hypr/xscale.lua                    xwayland.scale, and the toolkit
 #                                                settings at every login
+#   ~/.config/uwsm/env.d/50-xscale               Steam's scale for the whole
+#                                                session, from its start
 #   ~/.config/omarchy/hooks/post-update.d/50-xscale.sh
 #                                                a word after a system update
 #                                                that brought back Arch's
@@ -33,6 +35,7 @@ link() {
 link "$ROOT/bin/xscale" "$HOME/.local/bin/xscale"
 link "$ROOT/hypr/xscale.lua" "$CONFIG/hypr/xscale.lua"
 link "$ROOT/hooks/post-update.sh" "$CONFIG/omarchy/hooks/post-update.d/50-xscale.sh"
+link "$ROOT/session/uwsm-env" "$CONFIG/uwsm/env.d/50-xscale"
 
 if [ -f "$HYPRLAND_LUA" ] && ! grep -q '^-- >>> xscale' "$HYPRLAND_LUA"; then
   cat >>"$HYPRLAND_LUA" <<'EOF'
