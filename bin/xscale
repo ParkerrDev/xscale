@@ -146,8 +146,12 @@ cmd_settings() {
     echo "xscale: xsettingsd is not installed, so X11 GTK apps keep a scale of 1 (omarchy pkg add xsettingsd)" >&2
   fi
 
-  # Steam scales its interface by its own setting
+  # Steam scales its interface by its own setting: for what Hyprland starts, and
+  # for what launchers start through systemd and D-Bus (uwsm app), which take
+  # the session's environment instead of Hyprland's
   hyprctl eval "hl.env(\"STEAM_FORCE_DESKTOPUI_SCALING\", \"$scale\")" >/dev/null 2>&1 || true
+  dbus-update-activation-environment --systemd "STEAM_FORCE_DESKTOPUI_SCALING=$scale" >/dev/null 2>&1 ||
+    systemctl --user set-environment "STEAM_FORCE_DESKTOPUI_SCALING=$scale" 2>/dev/null || true
   echo "xscale: X11 apps on $display render at $scale"
 }
 
