@@ -1,0 +1,90 @@
+From 71e5da28ea29904dbdb1861444c89299a3291ddd Mon Sep 17 00:00:00 2001
+From: ParkerrDev <114211845+ParkerrDev@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 22:31:55 -0700
+Subject: [PATCH] xwayland-shell: add a scale event
+
+An X11 screen has a single coordinate space and a single DPI for all its
+clients, so rootless Xwayland cannot give X11 clients a scale per output.
+Compositors work around this today by laying the X11 screen out in output
+pixels and scaling the X11 surfaces themselves (Mutter's
+xwayland-native-scaling, KWin, Hyprland's force_zero_scaling), each with
+its own handling of surface sizes, input coordinates and cursors.
+
+Version 2 adds an event with which the compositor tells Xwayland the one
+scale its X11 clients render at, typically that of the highest-density
+output. Xwayland then lays the X11 screen out at the logical output
+geometry times the scale and shows every surface at its buffer size
+divided by it through wp_viewport, mapping input coordinates and cursors
+accordingly. To the compositor, X11 surfaces become ordinary HiDPI
+surfaces: shown pixel for pixel on outputs of that scale and downscaled
+on lower ones, with no special case for them in the renderer or in input
+handling.
+
+The scale is sent in 120ths, as wp_fractional_scale_v1 has it, so
+fractional scales work; wp_viewport makes windows of any size valid at
+any scale, which wl_surface.set_buffer_scale could not.
+---
+ staging/xwayland-shell/xwayland-shell-v1.xml | 40 +++++++++++++++++++-
+ 1 file changed, 39 insertions(+), 1 deletion(-)
+
+diff --git a/staging/xwayland-shell/xwayland-shell-v1.xml b/staging/xwayland-shell/xwayland-shell-v1.xml
+index 99a2a94..a7fcc1f 100644
+--- a/staging/xwayland-shell/xwayland-shell-v1.xml
++++ b/staging/xwayland-shell/xwayland-shell-v1.xml
+@@ -56,7 +56,7 @@
+     only be done by creating a new major version of the extension.
+   </description>
+ 
+-  <interface name="xwayland_shell_v1" version="1">
++  <interface name="xwayland_shell_v1" version="2">
+     <description summary="context object for Xwayland shell">
+       xwayland_shell_v1 is a singleton global object that
+       provides the ability to create a xwayland_surface_v1 object
+@@ -103,6 +103,44 @@
+       <arg name="id" type="new_id" interface="xwayland_surface_v1"/>
+       <arg name="surface" type="object" interface="wl_surface"/>
+     </request>
++
++    <!-- Version 2 additions -->
++
++    <event name="scale" since="2">
++      <description summary="the scale X11 clients render at">
++        Tells the Xwayland server the scale its X11 clients render at, times
++        120 (as wp_fractional_scale_v1.preferred_scale has it): 240 is a scale
++        of 2, 180 a scale of 1.5. The compositor sends it after the global is
++        bound, and again whenever the scale changes. Sending the scale the
++        server already has changes nothing.
++
++        An X11 screen has a single coordinate space and a single DPI for all
++        its clients, so a scale cannot be given per window. With this event a
++        compositor can let X11 clients render at the scale of its
++        highest-density output and show them, like any other high-density
++        surface, at their logical size on every output: sharp where the output
++        has that density, downscaled where it has less, and never upscaled.
++
++        The Xwayland server multiplies the logical geometry of every output
++        (from xdg_output) by the scale to lay out the X11 screen, rounding the
++        edges of each output to whole pixels so that outputs next to each
++        other stay next to each other. It shows every surface it creates,
++        the window manager's included, at its buffer size divided by the scale
++        (through wp_viewport.set_destination, so that X11 windows of any size
++        can be shown), multiplies the surface-local coordinates of input
++        events by it, and shows X11 cursors at their size divided by it.
++
++        A compositor that sends this event places X11 windows by their X11
++        geometry divided by the scale, and should tell X11 toolkits of the
++        scale the way it would otherwise (Xft.dpi, XSETTINGS).
++
++        A scale of 120, or never receiving the event, is the behaviour of
++        version 1. The Xwayland server ignores the event when it runs
++        rootful, or when the compositor does not offer wp_viewporter,
++        zxdg_output_manager_v1 and wl_surface.damage_buffer.
++      </description>
++      <arg name="scale" type="uint" summary="the scale times 120"/>
++    </event>
+   </interface>
+ 
+   <interface name="xwayland_surface_v1" version="1">
+-- 
+2.56.0
+

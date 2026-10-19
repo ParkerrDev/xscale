@@ -1,0 +1,606 @@
+From 751062506220b9cb78a078a700bb52265dd589c8 Mon Sep 17 00:00:00 2001
+From: ParkerrDev <114211845+ParkerrDev@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 22:35:59 -0700
+Subject: [PATCH 2/3] xwayland: Honour a rootless scale from xwayland_shell_v1
+
+An X11 screen has a single coordinate space and a single DPI for all its
+clients, so in rootless mode Xwayland cannot give X11 clients the scale of
+the output they are on. Compositors work around it by laying the X11
+screen out in output pixels and scaling X11 surfaces themselves, each with
+its own handling of surface sizes, input coordinates and cursors, and
+with X11 cursors shown at the wrong size.
+
+xwayland_shell_v1 version 2 adds a scale event: the compositor tells
+Xwayland the one scale its X11 clients render at, typically that of its
+highest-density output. With it, in rootless mode and with wp_viewporter,
+xdg-output and buffer damage available, Xwayland:
+
+ - lays the X11 screen out at the logical geometry of every output times
+   the scale, rounding the edges so that adjacent outputs stay adjacent;
+ - shows every surface it creates at its buffer size divided by the
+   scale, through wp_viewport.set_destination (any window size works, and
+   fractional scales too, which wl_surface.set_buffer_scale could not do);
+ - maps input coordinates back through each window's viewport scale, as it
+   already does for resolution change emulation, whose viewport now
+   targets the output's size in the compositor's coordinates;
+ - shows X11 cursors at their size divided by the scale, also through a
+   viewport, so that an X11 cursor of Xcursor.size 24 times the scale is
+   as large as a Wayland one.
+
+To the compositor, X11 surfaces become ordinary HiDPI surfaces: pixel for
+pixel on outputs of that scale, downscaled on lower ones, never upscaled.
+A scale of 1, or a compositor that only offers version 1, leaves
+everything as it was. The event is compiled in when the wayland-protocols
+in use has it.
+---
+ hw/xwayland/xwayland-cursor.c | 67 +++++++++++++++++++++++++++----
+ hw/xwayland/xwayland-cursor.h |  1 +
+ hw/xwayland/xwayland-input.c  |  1 +
+ hw/xwayland/xwayland-input.h  |  1 +
+ hw/xwayland/xwayland-output.c | 68 +++++++++++++++++++++++++++----
+ hw/xwayland/xwayland-output.h |  6 +++
+ hw/xwayland/xwayland-screen.c | 75 ++++++++++++++++++++++++++++++++++-
+ hw/xwayland/xwayland-screen.h |  8 ++++
+ hw/xwayland/xwayland-window.c | 64 +++++++++++++++++++++++++++++-
+ hw/xwayland/xwayland-window.h |  1 +
+ 10 files changed, 275 insertions(+), 17 deletions(-)
+
+diff --git a/hw/xwayland/xwayland-cursor.c b/hw/xwayland/xwayland-cursor.c
+index fa77f6d..1c18cf6 100644
+--- a/hw/xwayland/xwayland-cursor.c
++++ b/hw/xwayland/xwayland-cursor.c
+@@ -26,6 +26,8 @@
+ 
+ #include <xwayland-config.h>
+ 
++#include <math.h>
++
+ #include "scrnintstr.h"
+ #include "servermd.h"
+ #include "cursorstr.h"
+@@ -40,6 +42,7 @@
+ #include "xwayland-types.h"
+ 
+ #include "tablet-unstable-v2-client-protocol.h"
++#include "viewporter-client-protocol.h"
+ 
+ #define DELAYED_X_CURSOR_TIMEOUT 5 /* ms */
+ 
+@@ -135,6 +138,43 @@ xwl_cursor_copy_bits_to_pixmap(CursorPtr cursor, PixmapPtr pixmap)
+         expand_source_and_mask(cursor, pixmap->devPrivate.ptr);
+ }
+ 
++/* X11 cursors are drawn at the scale X11 clients render at: with a rootless
++ * scale, they are shown at their size divided by it, as the cursors of HiDPI
++ * Wayland clients are.
++ */
++static void
++xwl_cursor_set_scale(struct xwl_screen *xwl_screen,
++                     struct xwl_cursor *xwl_cursor, int width, int height)
++{
++    double scale = xwl_screen_get_rootless_scale(xwl_screen);
++    int destination_width, destination_height;
++
++    wl_surface_set_buffer_scale(xwl_cursor->surface, xwl_screen->global_surface_scale);
++
++    if (fabs(scale - 1.0) > 1e-6) {
++        if (!xwl_cursor->viewport)
++            xwl_cursor->viewport = wp_viewporter_get_viewport(xwl_screen->viewporter,
++                                                              xwl_cursor->surface);
++        destination_width = round(width / scale);
++        destination_height = round(height / scale);
++        wp_viewport_set_destination(xwl_cursor->viewport,
++                                    max(destination_width, 1),
++                                    max(destination_height, 1));
++    } else if (xwl_cursor->viewport) {
++        wp_viewport_destroy(xwl_cursor->viewport);
++        xwl_cursor->viewport = NULL;
++    }
++}
++
++/* A hotspot in surface-local coordinates */
++static int
++xwl_cursor_hotspot(struct xwl_screen *xwl_screen, int hot)
++{
++    double scale = xwl_screen_get_rootless_scale(xwl_screen);
++
++    return round((hot / xwl_screen->global_surface_scale) / scale);
++}
++
+ static void
+ xwl_cursor_attach_pixmap(struct xwl_seat *xwl_seat,
+                          struct xwl_cursor *xwl_cursor, PixmapPtr pixmap)
+@@ -149,7 +189,9 @@ xwl_cursor_attach_pixmap(struct xwl_seat *xwl_seat,
+     }
+ 
+     wl_surface_attach(xwl_cursor->surface, buffer, 0, 0);
+-    wl_surface_set_buffer_scale(xwl_cursor->surface, xwl_screen->global_surface_scale);
++    xwl_cursor_set_scale(xwl_screen, xwl_cursor,
++                         xwl_seat->x_cursor->bits->width,
++                         xwl_seat->x_cursor->bits->height);
+     xwl_surface_damage(xwl_screen, xwl_cursor->surface, 0, 0,
+                        xwl_seat->x_cursor->bits->width,
+                        xwl_seat->x_cursor->bits->height);
+@@ -213,8 +255,8 @@ xwl_seat_set_cursor(struct xwl_seat *xwl_seat)
+ 
+     xwl_cursor_copy_bits_to_pixmap(cursor, pixmap);
+ 
+-    xhot = xwl_seat->x_cursor->bits->xhot / xwl_screen->global_surface_scale;
+-    yhot = xwl_seat->x_cursor->bits->yhot / xwl_screen->global_surface_scale;
++    xhot = xwl_cursor_hotspot(xwl_screen, xwl_seat->x_cursor->bits->xhot);
++    yhot = xwl_cursor_hotspot(xwl_screen, xwl_seat->x_cursor->bits->yhot);
+ 
+     wl_pointer_set_cursor(xwl_seat->wl_pointer,
+                           xwl_seat->pointer_enter_serial,
+@@ -258,8 +300,8 @@ xwl_tablet_tool_set_cursor(struct xwl_tablet_tool *xwl_tablet_tool)
+ 
+     xwl_cursor_copy_bits_to_pixmap(cursor, pixmap);
+ 
+-    xhot = xwl_seat->x_cursor->bits->xhot / xwl_screen->global_surface_scale;
+-    yhot = xwl_seat->x_cursor->bits->yhot / xwl_screen->global_surface_scale;
++    xhot = xwl_cursor_hotspot(xwl_screen, xwl_seat->x_cursor->bits->xhot);
++    yhot = xwl_cursor_hotspot(xwl_screen, xwl_seat->x_cursor->bits->yhot);
+ 
+     zwp_tablet_tool_v2_set_cursor(xwl_tablet_tool->tool,
+                                   xwl_tablet_tool->proximity_in_serial,
+@@ -273,12 +315,17 @@ xwl_tablet_tool_set_cursor(struct xwl_tablet_tool *xwl_tablet_tool)
+ void
+ xwl_cursor_release(struct xwl_cursor *xwl_cursor)
+ {
++    if (xwl_cursor->viewport) {
++        wp_viewport_destroy(xwl_cursor->viewport);
++        xwl_cursor->viewport = NULL;
++    }
+     wl_surface_destroy(xwl_cursor->surface);
+     xwl_cursor_clear_frame_cb(xwl_cursor);
+ }
+ 
+-static void
+-xwl_seat_update_all_cursors(struct xwl_seat *xwl_seat)
++/* Shows the cursors again, as they are now */
++void
++xwl_seat_update_cursors(struct xwl_seat *xwl_seat)
+ {
+     struct xwl_tablet_tool *xwl_tablet_tool;
+ 
+@@ -288,6 +335,12 @@ xwl_seat_update_all_cursors(struct xwl_seat *xwl_seat)
+         if (xwl_tablet_tool->proximity_in_serial != 0)
+             xwl_tablet_tool_set_cursor(xwl_tablet_tool);
+     }
++}
++
++static void
++xwl_seat_update_all_cursors(struct xwl_seat *xwl_seat)
++{
++    xwl_seat_update_cursors(xwl_seat);
+ 
+     /* Clear delayed cursor if any */
+     xwl_seat->pending_x_cursor = NULL;
+diff --git a/hw/xwayland/xwayland-cursor.h b/hw/xwayland/xwayland-cursor.h
+index 76b5b49..6066eef 100644
+--- a/hw/xwayland/xwayland-cursor.h
++++ b/hw/xwayland/xwayland-cursor.h
+@@ -35,6 +35,7 @@ Bool xwl_cursor_clear_frame_cb(struct xwl_cursor *xwl_cursor);
+ void xwl_cursor_release(struct xwl_cursor *xwl_cursor);
+ void xwl_tablet_tool_set_cursor(struct xwl_tablet_tool *tool);
+ void xwl_seat_set_cursor(struct xwl_seat *xwl_seat);
++void xwl_seat_update_cursors(struct xwl_seat *xwl_seat);
+ Bool xwl_screen_init_cursor(struct xwl_screen *xwl_screen);
+ 
+ #endif /* XWAYLAND_CURSOR_H */
+diff --git a/hw/xwayland/xwayland-input.c b/hw/xwayland/xwayland-input.c
+index f720641..d28266f 100644
+--- a/hw/xwayland/xwayland-input.c
++++ b/hw/xwayland/xwayland-input.c
+@@ -2148,6 +2148,7 @@ xwl_cursor_init(struct xwl_cursor *xwl_cursor, struct xwl_screen *xwl_screen,
+                 void (* update_proc)(struct xwl_cursor *))
+ {
+     xwl_cursor->surface = wl_compositor_create_surface(xwl_screen->compositor);
++    xwl_cursor->viewport = NULL;
+     xwl_cursor->update_proc = update_proc;
+     xwl_cursor->frame_cb = NULL;
+     xwl_cursor->needs_update = FALSE;
+diff --git a/hw/xwayland/xwayland-input.h b/hw/xwayland/xwayland-input.h
+index 3cb5223..c7ec092 100644
+--- a/hw/xwayland/xwayland-input.h
++++ b/hw/xwayland/xwayland-input.h
+@@ -49,6 +49,7 @@ struct xwl_pointer_warp_emulator {
+ struct xwl_cursor {
+     void (* update_proc) (struct xwl_cursor *);
+     struct wl_surface *surface;
++    struct wp_viewport *viewport; /* with a rootless scale */
+     struct wl_callback *frame_cb;
+     Bool needs_update;
+ };
+diff --git a/hw/xwayland/xwayland-output.c b/hw/xwayland/xwayland-output.c
+index 674a2c2..8b75ec2 100644
+--- a/hw/xwayland/xwayland-output.c
++++ b/hw/xwayland/xwayland-output.c
+@@ -83,6 +83,23 @@ wl_subpixel_to_xrandr(int subpixel)
+     }
+ }
+ 
++/* The geometry X11 clients see: the logical one times the rootless scale. The
++ * edges are scaled rather than the size, so that outputs next to each other in
++ * the compositor stay next to each other in X11.
++ */
++void
++xwl_output_update_rootless_geometry(struct xwl_output *xwl_output)
++{
++    double scale = xwl_screen_get_rootless_scale(xwl_output->xwl_screen);
++
++    xwl_output->logical_x = round(xwl_output->wl_x * scale);
++    xwl_output->logical_y = round(xwl_output->wl_y * scale);
++    xwl_output->logical_w =
++        round((xwl_output->wl_x + xwl_output->wl_w) * scale) - xwl_output->logical_x;
++    xwl_output->logical_h =
++        round((xwl_output->wl_y + xwl_output->wl_h) * scale) - xwl_output->logical_y;
++}
++
+ static void
+ output_handle_geometry(void *data, struct wl_output *wl_output, int x, int y,
+                        int physical_width, int physical_height, int subpixel,
+@@ -99,8 +116,9 @@ output_handle_geometry(void *data, struct wl_output *wl_output, int x, int y,
+ 
+     /* Apply the change from wl_output only if xdg-output is not supported */
+     if (!xwl_output->xdg_output) {
+-        xwl_output->logical_x = x;
+-        xwl_output->logical_y = y;
++        xwl_output->wl_x = x;
++        xwl_output->wl_y = y;
++        xwl_output_update_rootless_geometry(xwl_output);
+     }
+     xwl_output->rotation = wl_transform_to_xrandr(transform);
+ }
+@@ -116,8 +134,9 @@ output_handle_mode(void *data, struct wl_output *wl_output, uint32_t flags,
+ 
+     /* Apply the change from wl_output only if xdg-output is not supported */
+     if (!xwl_output->xdg_output) {
+-        xwl_output->logical_w = width;
+-        xwl_output->logical_h = height;
++        xwl_output->wl_w = width;
++        xwl_output->wl_h = height;
++        xwl_output_update_rootless_geometry(xwl_output);
+     }
+ 
+     xwl_output->mode_width = width;
+@@ -139,6 +158,21 @@ output_get_logical_mode(struct xwl_output *xwl_output, int *width, int *height)
+     }
+ }
+ 
++/* The output's size in the compositor's coordinates */
++void
++output_get_wayland_extents(struct xwl_output *xwl_output, int *width, int *height)
++{
++    /* When we have xdg-output support the stored size is already rotated. */
++    if (xwl_output->xdg_output ||
++        (xwl_output->rotation & (RR_Rotate_0 | RR_Rotate_180))) {
++        *width = xwl_output->wl_w;
++        *height = xwl_output->wl_h;
++    } else {
++        *width = xwl_output->wl_h;
++        *height = xwl_output->wl_w;
++    }
++}
++
+ void
+ output_get_logical_extents(struct xwl_output *xwl_output, int *width, int *height)
+ {
+@@ -767,6 +801,22 @@ apply_output_change(struct xwl_output *xwl_output)
+     maybe_update_fullscreen_state(xwl_output);
+ }
+ 
++/* Tells X11 clients about the output again after the rootless scale changed.
++ * This is not an update from the compositor: whatever it is in the middle of
++ * sending is still to come.
++ */
++void
++xwl_output_apply_rootless_scale(struct xwl_output *xwl_output)
++{
++    Bool wl_output_done = xwl_output->wl_output_done;
++    Bool xdg_output_done = xwl_output->xdg_output_done;
++
++    apply_output_change(xwl_output);
++
++    xwl_output->wl_output_done = wl_output_done;
++    xwl_output->xdg_output_done = xdg_output_done;
++}
++
+ void
+ xwl_output_set_name(struct xwl_output *xwl_output, const char *name)
+ {
+@@ -865,8 +915,9 @@ xdg_output_handle_logical_position(void *data, struct zxdg_output_v1 *xdg_output
+ {
+     struct xwl_output *xwl_output = data;
+ 
+-    xwl_output->logical_x = x;
+-    xwl_output->logical_y = y;
++    xwl_output->wl_x = x;
++    xwl_output->wl_y = y;
++    xwl_output_update_rootless_geometry(xwl_output);
+ }
+ 
+ static void
+@@ -875,8 +926,9 @@ xdg_output_handle_logical_size(void *data, struct zxdg_output_v1 *xdg_output,
+ {
+     struct xwl_output *xwl_output = data;
+ 
+-    xwl_output->logical_w = width;
+-    xwl_output->logical_h = height;
++    xwl_output->wl_w = width;
++    xwl_output->wl_h = height;
++    xwl_output_update_rootless_geometry(xwl_output);
+ }
+ 
+ static void
+diff --git a/hw/xwayland/xwayland-output.h b/hw/xwayland/xwayland-output.h
+index 8bce0ba..e878e86 100644
+--- a/hw/xwayland/xwayland-output.h
++++ b/hw/xwayland/xwayland-output.h
+@@ -57,6 +57,9 @@ struct xwl_output {
+     struct zxdg_output_v1 *xdg_output;
+     uint32_t server_output_id;
+     int32_t logical_x, logical_y, logical_w, logical_h;
++    /* The geometry as the compositor sent it: the logical one above is this
++     * times the rootless scale */
++    int32_t wl_x, wl_y, wl_w, wl_h;
+     int32_t mode_width, mode_height, refresh, scale;
+     double xscale; /* Effective scale, can be fractional */
+     Rotation rotation;
+@@ -112,6 +115,9 @@ struct xwl_emulated_mode *xwl_output_get_emulated_mode_for_client(
+                             struct xwl_output *xwl_output, ClientPtr client);
+ 
+ void output_get_logical_extents(struct xwl_output *xwl_output, int *width, int *height);
++void output_get_wayland_extents(struct xwl_output *xwl_output, int *width, int *height);
++void xwl_output_update_rootless_geometry(struct xwl_output *xwl_output);
++void xwl_output_apply_rootless_scale(struct xwl_output *xwl_output);
+ 
+ RRModePtr xwl_output_find_mode(struct xwl_output *xwl_output,
+                                int32_t width, int32_t height);
+diff --git a/hw/xwayland/xwayland-screen.c b/hw/xwayland/xwayland-screen.c
+index 423bffe..0cb13f3 100644
+--- a/hw/xwayland/xwayland-screen.c
++++ b/hw/xwayland/xwayland-screen.c
+@@ -527,6 +527,67 @@ static const struct xdg_wm_base_listener xdg_wm_base_listener = {
+     xdg_wm_base_ping,
+ };
+ 
++double
++xwl_screen_get_rootless_scale(struct xwl_screen *xwl_screen)
++{
++    return xwl_screen->rootless_scale;
++}
++
++/* Lays out the outputs, the windows and the cursors at the scale X11 clients
++ * render at. Every surface is then shown at its buffer size divided by the
++ * scale, through wp_viewporter, so the scale needs it (and xdg-output, for the
++ * logical geometry of the outputs).
++ */
++void
++xwl_screen_set_rootless_scale(struct xwl_screen *xwl_screen, double scale)
++{
++    struct xwl_output *xwl_output;
++    struct xwl_window *xwl_window;
++    struct xwl_seat *xwl_seat;
++
++    /* A scale that is not one (nothing, a negative, a runaway) is no scale */
++    if (!(scale >= 0.25 && scale <= 8.0))
++        scale = 1.0;
++
++    if (!xwl_screen->rootless || !xwl_screen->compositor ||
++        !xwl_screen_has_viewport_support(xwl_screen) ||
++        !xwl_screen->xdg_output_manager)
++        scale = 1.0;
++
++    if (fabs(scale - xwl_screen->rootless_scale) < 1e-6)
++        return;
++
++    DebugF("XWAYLAND: rootless scale is now %f (was %f)\n",
++           scale, xwl_screen->rootless_scale);
++    xwl_screen->rootless_scale = scale;
++
++    /* All outputs first, so that the screen is only ever resized to the
++     * final size */
++    xorg_list_for_each_entry(xwl_output, &xwl_screen->output_list, link)
++        xwl_output_update_rootless_geometry(xwl_output);
++    xorg_list_for_each_entry(xwl_output, &xwl_screen->output_list, link)
++        xwl_output_apply_rootless_scale(xwl_output);
++
++    xorg_list_for_each_entry(xwl_window, &xwl_screen->window_list, link_window)
++        xwl_window_apply_rootless_scale(xwl_window);
++
++    xorg_list_for_each_entry(xwl_seat, &xwl_screen->seat_list, link)
++        xwl_seat_update_cursors(xwl_seat);
++}
++
++#ifdef XWAYLAND_SHELL_V1_SCALE_SINCE_VERSION
++static void
++xwayland_shell_handle_scale(void *data, struct xwayland_shell_v1 *xwayland_shell,
++                            uint32_t scale)
++{
++    xwl_screen_set_rootless_scale(data, (double) scale / XWL_ROOTLESS_SCALE_DENOMINATOR);
++}
++
++static const struct xwayland_shell_v1_listener xwayland_shell_listener = {
++    xwayland_shell_handle_scale,
++};
++#endif
++
+ static void
+ registry_global(void *data, struct wl_registry *registry, uint32_t id,
+                 const char *interface, uint32_t version)
+@@ -580,8 +641,19 @@ registry_global(void *data, struct wl_registry *registry, uint32_t id,
+         xwl_screen->viewporter = wl_registry_bind(registry, id, &wp_viewporter_interface, 1);
+     }
+     else if (strcmp(interface, xwayland_shell_v1_interface.name) == 0 && xwl_screen->rootless) {
++#ifdef XWAYLAND_SHELL_V1_SCALE_SINCE_VERSION
++        /* Version 2 adds the scale X11 clients render at */
++        version = min(version, XWAYLAND_SHELL_V1_SCALE_SINCE_VERSION);
++#else
++        version = 1;
++#endif
+         xwl_screen->xwayland_shell =
+-            wl_registry_bind(registry, id, &xwayland_shell_v1_interface, 1);
++            wl_registry_bind(registry, id, &xwayland_shell_v1_interface, version);
++#ifdef XWAYLAND_SHELL_V1_SCALE_SINCE_VERSION
++        if (version >= XWAYLAND_SHELL_V1_SCALE_SINCE_VERSION)
++            xwayland_shell_v1_add_listener(xwl_screen->xwayland_shell,
++                                           &xwayland_shell_listener, xwl_screen);
++#endif
+     }
+     else if (strcmp(interface, wp_tearing_control_manager_v1_interface.name) == 0) {
+         xwl_screen->tearing_control_manager =
+@@ -1134,6 +1206,7 @@ xwl_screen_init(ScreenPtr pScreen, int argc, char **argv)
+     xorg_list_init(&xwl_screen->pending_wl_surface_destroy);
+     xwl_screen->depth = 24;
+     xwl_screen->global_surface_scale = 1;
++    xwl_screen->rootless_scale = 1.0;
+ 
+     if (!monitorResolution)
+         monitorResolution = DEFAULT_DPI;
+diff --git a/hw/xwayland/xwayland-screen.h b/hw/xwayland/xwayland-screen.h
+index 8f4ce5c..0b6aacf 100644
+--- a/hw/xwayland/xwayland-screen.h
++++ b/hw/xwayland/xwayland-screen.h
+@@ -45,11 +45,17 @@
+ #include <libdecor.h>
+ #endif
+ 
++/* xwayland_shell_v1.scale sends the scale times this, as wp_fractional_scale_v1 */
++#define XWL_ROOTLESS_SCALE_DENOMINATOR 120.0
++
+ struct xwl_screen {
+     double width;
+     double height;
+     int depth;
+     int global_surface_scale;
++    /* Rootless: the scale X11 clients render at, from xwayland_shell_v1.scale
++     * (1.0 without it) */
++    double rootless_scale;
+     int output_name_serial;
+     ScreenPtr screen;
+     int wm_client_id;
+@@ -191,6 +197,8 @@ void xwl_surface_damage(struct xwl_screen *xwl_screen,
+ int xwl_screen_get_next_output_serial(struct xwl_screen * xwl_screen);
+ void xwl_screen_lost_focus(struct xwl_screen *xwl_screen);
+ Bool xwl_screen_update_global_surface_scale(struct xwl_screen *xwl_screen);
++double xwl_screen_get_rootless_scale(struct xwl_screen *xwl_screen);
++void xwl_screen_set_rootless_scale(struct xwl_screen *xwl_screen, double scale);
+ Bool xwl_screen_should_use_fractional_scale(struct xwl_screen *xwl_screen);
+ Bool xwl_screen_validate_options(int argc, char **argv);
+ struct xwl_seat *xwl_screen_get_default_seat(struct xwl_screen *xwl_screen);
+diff --git a/hw/xwayland/xwayland-window.c b/hw/xwayland/xwayland-window.c
+index c3cc56c..f664aaf 100644
+--- a/hw/xwayland/xwayland-window.c
++++ b/hw/xwayland/xwayland-window.c
+@@ -463,7 +463,8 @@ xwl_window_enable_viewport_for_output(struct xwl_window *xwl_window,
+         height = emulated_mode->width / xwl_screen->global_surface_scale;
+     }
+ 
+-    output_get_logical_extents(xwl_output, &logical_width, &logical_height);
++    /* the destination is in the compositor's coordinates */
++    output_get_wayland_extents(xwl_output, &logical_width, &logical_height);
+ 
+     if (!xwl_window_has_viewport_enabled(xwl_window)) {
+         DebugF("XWAYLAND: enabling viewport %dx%d -> %dx%d\n",
+@@ -485,6 +486,52 @@ xwl_window_enable_viewport_for_output(struct xwl_window *xwl_window,
+     xwl_window_set_input_region(xwl_window, wInputShape(xwl_window->toplevel));
+ }
+ 
++static Bool
++xwl_window_should_enable_rootless_scale_viewport(struct xwl_window *xwl_window)
++{
++    struct xwl_screen *xwl_screen = xwl_window->xwl_screen;
++
++    return fabs(xwl_screen_get_rootless_scale(xwl_screen) - 1.0) > FLT_EPSILON;
++}
++
++/* Enable the viewport for the rootless scale (xwayland_shell_v1.scale): the
++ * surface is shown at its buffer size divided by the scale, as the surface of
++ * a HiDPI Wayland client would be.
++ */
++static void
++xwl_window_enable_viewport_for_rootless_scale(struct xwl_window *xwl_window)
++{
++    struct xwl_screen *xwl_screen = xwl_window->xwl_screen;
++    WindowPtr window = xwl_window->toplevel;
++    double scale = xwl_screen_get_rootless_scale(xwl_screen);
++    int buffer_width, buffer_height, width, height;
++
++    buffer_width = window->drawable.width + 2 * window->borderWidth;
++    buffer_height = window->drawable.height + 2 * window->borderWidth;
++    width = round(buffer_width / scale);
++    height = round(buffer_height / scale);
++    width = max(width, 1);
++    height = max(height, 1);
++
++    if (!xwl_window_has_viewport_enabled(xwl_window))
++        xwl_window->viewport = wp_viewporter_get_viewport(xwl_screen->viewporter,
++                                                          xwl_window->surface);
++
++    DebugF("XWAYLAND: enabling viewport for rootless scale %dx%d -> %dx%d\n",
++           buffer_width, buffer_height, width, height);
++    /* The whole buffer, whatever its size when the destination applies */
++    wp_viewport_set_source(xwl_window->viewport,
++                           wl_fixed_from_int(-1),
++                           wl_fixed_from_int(-1),
++                           wl_fixed_from_int(-1),
++                           wl_fixed_from_int(-1));
++    wp_viewport_set_destination(xwl_window->viewport, width, height);
++
++    xwl_window->viewport_scale_x = (float) buffer_width / width;
++    xwl_window->viewport_scale_y = (float) buffer_height / height;
++    xwl_window_set_input_region(xwl_window, wInputShape(xwl_window->toplevel));
++}
++
+ static Bool
+ window_is_wm_window(WindowPtr window)
+ {
+@@ -701,10 +748,22 @@ xwl_window_check_resolution_change_emulation(struct xwl_window *xwl_window)
+         xwl_window_enable_viewport_for_output(xwl_window, xwl_output, &emulated_mode);
+     else if (xwl_window_should_enable_fractional_scale_viewport(xwl_window))
+         return;
++    else if (xwl_window_should_enable_rootless_scale_viewport(xwl_window))
++        xwl_window_enable_viewport_for_rootless_scale(xwl_window);
+     else if (xwl_window_has_viewport_enabled(xwl_window))
+         xwl_window_disable_viewport(xwl_window);
+ }
+ 
++/* The rootless scale changed: show the surface at the new one */
++void
++xwl_window_apply_rootless_scale(struct xwl_window *xwl_window)
++{
++    xwl_window_check_resolution_change_emulation(xwl_window);
++
++    if (xwl_window->allow_commits)
++        wl_surface_commit(xwl_window->surface);
++}
++
+ /* This checks if the passed in Window is a toplevel client window, note this
+  * returns false for window-manager decoration windows and returns true for
+  * the actual client top-level window even if it has been reparented to
+@@ -1576,6 +1635,9 @@ ensure_surface_for_window(WindowPtr window)
+         toplevel = window_get_client_toplevel(window);
+         if (toplevel)
+             xwl_output_set_window_randr_emu_props(xwl_screen, toplevel);
++        /* Window-manager windows are shown at the rootless scale too */
++        if (xwl_window_should_enable_rootless_scale_viewport(xwl_window))
++            xwl_window_enable_viewport_for_rootless_scale(xwl_window);
+     } else {
+         /* CSD or O-R toplevel window, check viewport on creation */
+         xwl_window_check_resolution_change_emulation(xwl_window);
+diff --git a/hw/xwayland/xwayland-window.h b/hw/xwayland/xwayland-window.h
+index 09d5305..076bba0 100644
+--- a/hw/xwayland/xwayland-window.h
++++ b/hw/xwayland/xwayland-window.h
+@@ -119,6 +119,7 @@ void xwl_window_update_property(struct xwl_window *xwl_window,
+                                 PropertyStateRec *propstate);
+ Bool xwl_window_is_toplevel(WindowPtr window);
+ void xwl_window_check_resolution_change_emulation(struct xwl_window *xwl_window);
++void xwl_window_apply_rootless_scale(struct xwl_window *xwl_window);
+ void xwl_window_rootful_update_title(struct xwl_window *xwl_window);
+ void xwl_window_rootful_update_fullscreen(struct xwl_window *xwl_window,
+                                           struct xwl_output *xwl_output);
+-- 
+2.56.0
+

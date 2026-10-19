@@ -1,0 +1,77 @@
+From 0f93fed02221840f25835f01a039f950d7e58d9b Mon Sep 17 00:00:00 2001
+From: ParkerrDev <114211845+ParkerrDev@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 22:35:59 -0700
+Subject: [PATCH 3/3] xwayland/xtest: Send logical coordinates to EIS
+
+XTest motion arrives in X11 screen coordinates. With a rootless scale
+those are the compositor's logical coordinates times the scale, so divide
+them by it before they go to EIS, absolute and relative alike.
+---
+ hw/xwayland/xwayland-xtest.c | 22 ++++++++++++++++------
+ 1 file changed, 16 insertions(+), 6 deletions(-)
+
+diff --git a/hw/xwayland/xwayland-xtest.c b/hw/xwayland/xwayland-xtest.c
+index 05919a2..8ce4f6d 100644
+--- a/hw/xwayland/xwayland-xtest.c
++++ b/hw/xwayland/xwayland-xtest.c
+@@ -27,6 +27,7 @@
+ 
+ #include <inputstr.h>
+ #include <inpututils.h>
++#include <scrnintstr.h>
+ #include <libgen.h>
+ #include <unistd.h>
+ #include <errno.h>
+@@ -510,8 +511,15 @@ buttonmap(unsigned int b)
+     return button;
+ }
+ 
++/* EIS takes logical coordinates: the X11 ones divided by the rootless scale */
++static double
++xwl_ei_get_scale(void)
++{
++    return xwl_screen_get_rootless_scale(xwl_screen_get(screenInfo.screens[0]));
++}
++
+ static void
+-xwl_send_abs_event_to_ei(struct xwl_ei_client *xwl_ei_client, int sx, int sy)
++xwl_send_abs_event_to_ei(struct xwl_ei_client *xwl_ei_client, double x, double y)
+ {
+     struct xwl_abs_device *abs;
+     struct ei *ei = xwl_ei_client->ei;
+@@ -521,10 +529,8 @@ xwl_send_abs_event_to_ei(struct xwl_ei_client *xwl_ei_client, int sx, int sy)
+         size_t idx = 0;
+ 
+         while ((r = ei_device_get_region(abs->device, idx++))) {
+-            double x = sx, y = sy;
+-
+             if (ei_region_contains(r, x, y)) {
+-                ei_device_pointer_motion_absolute(abs->device, sx, sy);
++                ei_device_pointer_motion_absolute(abs->device, x, y);
+                 ei_device_frame(abs->device, ei_now(ei));
+                 return;
+             }
+@@ -551,14 +557,18 @@ xwl_send_event_to_ei(struct xwl_ei_client *xwl_ei_client,
+                 if (!xwl_ei_client->accept_abs)
+                     return false;
+ 
+-                xwl_send_abs_event_to_ei(xwl_ei_client, x, y);
++                xwl_send_abs_event_to_ei(xwl_ei_client,
++                                         x / xwl_ei_get_scale(),
++                                         y / xwl_ei_get_scale());
+             }
+             else if (x || y) {
+                 if (!xwl_ei_client->accept_pointer)
+                     return false;
+ 
+                 ei_device = xwl_ei_client->ei_pointer;
+-                ei_device_pointer_motion(ei_device, x, y);
++                ei_device_pointer_motion(ei_device,
++                                         x / xwl_ei_get_scale(),
++                                         y / xwl_ei_get_scale());
+                 ei_device_frame(ei_device, ei_now(ei));
+             }
+             break;
+-- 
+2.56.0
+
