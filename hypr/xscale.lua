@@ -8,10 +8,9 @@
 -- the windows at that size itself (xwayland_shell_v1 version 2); with Arch's,
 -- Hyprland does.
 --
--- It needs xscale's Hyprland (`xscale build`, then `xscale install`), which
--- /usr/share/hypr/xwayland-scale marks: Arch's refuses xwayland.scale, so on it
--- this file only tells X11 toolkits the scale Omarchy's force_zero_scaling
--- gives them.
+-- It needs xscale's Hyprland (`xscale build`, then `xscale install`): Arch's
+-- has no xwayland.scale, so on it this file only tells X11 toolkits the scale
+-- Omarchy's force_zero_scaling gives them.
 
 -- -1: the highest monitor scale rounded up to a whole number, which every
 -- toolkit can take (GTK only scales by whole numbers). -2: the highest scale
@@ -19,16 +18,9 @@
 -- their text. Or a number.
 local scale = -1
 
-local function exists(path)
-  local file = io.open(path, "r")
-  if file then
-    file:close()
-    return true
-  end
-  return false
-end
-
-if exists("/usr/share/hypr/xwayland-scale") then
+-- Asked of the running Hyprland, not of the installed one: between installing
+-- and the next login they differ, and an unknown option is a config error
+if hl.get_config("xwayland:scale") ~= nil then
   hl.config({ xwayland = { scale = scale } })
 end
 
