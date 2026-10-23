@@ -3,9 +3,12 @@
 # patch (xscale, ../../patches/hyprland-xwayland-scale.patch): xwayland:scale,
 # X11 clients at one scale on every monitor, sent to Xwayland through
 # xwayland_shell_v1 version 2 so that it shows every window at its logical size,
-# or applied by Hyprland itself with an Xwayland that does not take it.
-# Built by `xscale build`; the release number is Arch's plus .1, so pacman takes
-# it over Arch's build of the same version and gives it back at the next one.
+# or applied by Hyprland itself with an Xwayland that does not take it; and the
+# window rule xwayland_unscaled, for an X11 app that draws at 1x whatever it is
+# told (shown at its X11 size, enlarged).
+# Built by `xscale build`; the release number is Arch's plus .1 (.2 since the
+# rule), so pacman takes it over Arch's build of the same version and gives it
+# back at the next one.
 #
 # Maintainer: Caleb Maclennan <caleb@alerque.com>
 # Contributor: ThatOneCalculator <kainoa@t1c.dev>
@@ -14,7 +17,7 @@
 
 pkgname=(hyprland hyprpm)
 pkgver=0.56.2
-pkgrel=4.1
+pkgrel=4.2
 pkgdesc='a highly customizable dynamic tiling Wayland compositor'
 arch=(x86_64 aarch64)
 url="https://github.com/hyprwm/${pkgname^}"
@@ -100,7 +103,7 @@ package_hyprland() {
 	install -Dm0644 -t "$pkgdir/usr/share/licenses/$pkgname/" LICENSE
 	# what xscale's Lua looks for before it sets xwayland:scale, which a
 	# Hyprland without the patch refuses
-	printf '%s\n' 'Hyprland built with xscale: xwayland:scale is understood.' >"$srcdir/xwayland-scale"
+	printf '%s\n' 'Hyprland built with xscale: xwayland:scale and the xwayland_unscaled rule are understood.' >"$srcdir/xwayland-scale"
 	install -Dm0644 "$srcdir/xwayland-scale" "$pkgdir/usr/share/hypr/xwayland-scale"
 }
 

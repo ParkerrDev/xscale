@@ -43,6 +43,15 @@ upscaled. The pointer, touch, tablets and cursors follow.
    windows itself. It also fixes X11 size hints (minimum and maximum sizes),
    which were taken as logical sizes while they are X11 pixels.
 
+   It also has a window rule, `xwayland_unscaled`, for the X11 apps that draw
+   at 1x whatever they are told (Steam's updater, old Xlib or SDL programs):
+   rendered at the X11 scale they would come out at 1 / scale of their size, so
+   such a window is shown at its X11 size in logical pixels instead, its pixels
+   enlarged (filtered smoothly), as a HiDPI desktop shows an app that was never
+   made for it. Its menus and tooltips follow it, and the pointer lands on the
+   X11 pixel it is over. `xwayland:unscaled_windows = false` turns the rule off
+   everywhere.
+
 The toolkit side needs no patch: `xscale settings` tells X11 toolkits the scale
 through the X resources (`Xft.dpi`, `Xcursor.size`) and XSETTINGS (GTK's scale,
 font and icon theme, copied from the Wayland side), and Steam through its own
@@ -60,6 +69,12 @@ Measured in a nested Hyprland with a 1.6 monitor and a second one at 1:
   Wayland, on both monitors.
 - The pointer lands on the same X11 pixel it is over, on either monitor, and
   the X11 cursor is the size of Hyprland's own.
+- A 300x200 X11 window drawing at 1x, ruled `xwayland_unscaled`, is 300x200
+  logical pixels (480x320 on the 1.6 monitor) instead of 150x100; a popup it
+  opens 20,30 X11 pixels inside it sits 20,30 logical pixels inside it, at its
+  own size; the pointer lands on the X11 pixel it is over in both. Switching
+  the rule on or off keeps the window's X11 size, so the app never sees a
+  resize.
 - Hyprland's 275 unit tests pass, 5 of them new for this. A stock Hyprland with
   this Xwayland, and this Hyprland with a stock Xwayland, both behave as
   before.
@@ -85,6 +100,10 @@ takes the links away. The packages carry Arch's release number plus `.1`, so the
 next Hyprland or Xwayland release from Arch replaces them; the post-update hook
 then says so.
 
+`hypr/xscale.lua` shows Steam's updater ("Updating Steam...") unscaled and
+centred, and Super+Alt+X does the same for the focused window, or gives it
+back, for any other app that draws itself too small.
+
 The scale is `scale` at the top of `hypr/xscale.lua`. `-1`, the default, suits
 every toolkit, because GTK only scales by whole numbers. `-2` is pixel for
 pixel on the highest monitor, but GTK apps then scale only their text.
@@ -93,7 +112,7 @@ pixel on the highest monitor, but GTK apps then scale only their text.
 
 ```
 bin/xscale            status, settings, build, install, restore
-hypr/xscale.lua       xwayland.scale, and the toolkit settings at login
+hypr/xscale.lua       xwayland.scale, the toolkit settings at login, unscaled apps
 hooks/post-update.sh  a word when an update brought Arch's packages back
 patches/              the Hyprland and Xwayland patches
 pkg/                  Arch's recipes with the patches added
