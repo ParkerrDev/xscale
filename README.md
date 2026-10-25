@@ -4,6 +4,12 @@
 
 X11 has one coordinate space and one DPI for all its clients, so under Wayland an X11 app cannot be told "this monitor is 1.6 and that one is 1". Hyprland leaves two bad choices: X11 apps render at 1 and are enlarged (blurry), or `force_zero_scaling` shows them pixel for pixel (small, as Omarchy ships it) and every toolkit is told a scale by hand (`GDK_SCALE`, `Xft.dpi`, `--ozone-platform`, `STEAM_FORCE_DESKTOPUI_SCALING`), right on one monitor and wrong on the others. xscale fixes it where it breaks: in the protocol between Hyprland and Xwayland, in Xwayland, and in Hyprland. X11 apps render at the highest monitor's scale and each window is shown at its logical size, like a HiDPI Wayland window: pixel for pixel on that monitor, cleanly downscaled on the others, never enlarged.
 
+<p align="center">
+  <img src="assets/preview.webp" alt="Side by side, an X11 app dragged from a laptop at scale 1.6 up to a monitor at scale 1: small and cut off, blurry, or too big as Omarchy and Hyprland ship, sharp and the size of the Wayland app with xscale" width="960">
+  <br>
+  <a href="https://github.com/ParkerrDev/xscale/releases/latest/download/xscale.mp4">The whole video</a> (34 seconds, 1440p)
+</p>
+
 | X11 apps | On a monitor at 1.6 | On a monitor at 1 |
 |---|---|---|
 | Omarchy as it ships | small: drawn at 1, shown pixel for pixel | right |
