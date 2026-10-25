@@ -1,0 +1,75 @@
+name: packages
+# xscale's Hyprland and Xwayland for the versions Arch has: once a day, and
+# whenever the patches or the recipes change. Each is built from Arch's own
+# recipe with xscale's patch (`xscale recipe`), attested, and released as
+# NAME-VERSION with a SHA256SUMS, which is what `xscale install` downloads.
+# A version already released is not built again.
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths: [patches/**, pkg/**, bin/xscale, .github/workflows/packages.yml]
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+concurrency:
+  group: packages
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [xorg-xwayland, hyprland]
+    env:
+      GH_TOKEN: ${{ github.token }}
+      NAME: ${{ matrix.name }}
+    steps:
+      - name: Tools
+        run: |
+          pacman -Syu --noconfirm --needed git base-devel github-cli
+          useradd -m builder
+          install -d -o builder /tmp/out
+      - uses: actions/checkout@v4
+      - name: Recipe
+        id: recipe
+        run: |
+          chown -R builder .
+          version=$(su builder -c "bin/xscale recipe $NAME /tmp/recipe")
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "tag=$NAME-$version" >>"$GITHUB_OUTPUT"
+      - name: Released already?
+        id: released
+        run: |
+          if gh release view "${{ steps.recipe.outputs.tag }}" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Released already: ${{ steps.recipe.outputs.tag }}"
+            echo "already=yes" >>"$GITHUB_OUTPUT"
+          fi
+      - name: Build
+        if: steps.released.outputs.already != 'yes'
+        working-directory: /tmp/recipe
+        run: |
+          su builder -c 'makepkg --printsrcinfo' |
+            awk '$1 ~ /^(make|check)?depends$/ { print $3 }' | sed 's/[<>=].*//' |
+            xargs pacman -S --noconfirm --needed --asdeps
+          su builder -c 'GNUPGHOME=/tmp/recipe/.gnupg PKGDEST=/tmp/out makepkg --noconfirm'
+          cd /tmp/out
+          sha256sum -- *.pkg.tar.zst >SHA256SUMS
+          cat SHA256SUMS
+      - name: Attest
+        if: steps.released.outputs.already != 'yes'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: /tmp/out/*.pkg.tar.zst
+      - name: Release
+        if: steps.released.outputs.already != 'yes'
+        run: |
+          version=${{ steps.recipe.outputs.version }}
+          gh release create "$NAME-$version" /tmp/out/*.pkg.tar.zst /tmp/out/SHA256SUMS \
+            -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
+            --title "$NAME $version" \
+            --notes "xscale's $NAME for Arch's $NAME ${version%.*}: Arch's own recipe with xscale's patch, built by the packages workflow. \`xscale install\` downloads it and checks it against SHA256SUMS. \`gh attestation verify FILE -R $GITHUB_REPOSITORY\` shows which run of this repository built it."

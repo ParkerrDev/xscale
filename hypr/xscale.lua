@@ -1,5 +1,5 @@
 -- xscale: X11 apps as sharp as Wayland ones, at the right size on every
--- monitor (~/Dev/GitHub/xscale).
+-- monitor (https://github.com/ParkerrDev/xscale).
 --
 -- X11 has one coordinate space and one DPI for all its clients, so X11 apps
 -- render at one scale, the highest monitor's, and each window is shown at its
@@ -8,8 +8,8 @@
 -- the windows at that size itself (xwayland_shell_v1 version 2); with Arch's,
 -- Hyprland does.
 --
--- It needs xscale's Hyprland (`xscale build`, then `xscale install`): Arch's
--- has no xwayland.scale, so on it this file only tells X11 toolkits the scale
+-- It needs xscale's Hyprland (`xscale install`): Arch's has no
+-- xwayland.scale, so on it this file only tells X11 toolkits the scale
 -- Omarchy's force_zero_scaling gives them. Super+Alt+X enlarges an X11 app
 -- that draws itself too small.
 

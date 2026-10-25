@@ -1,6 +1,7 @@
 #!/bin/bash
-# Takes xscale's links and its block in hyprland.lua away again. The packages
-# stay as they are: `xscale restore` puts Arch's Hyprland and Xwayland back.
+# Takes xscale's links, its block in hyprland.lua and the settings it wrote
+# away again. The packages stay as they are: `xscale uninstall` runs this after
+# `xscale restore`, which puts Arch's Hyprland and Xwayland back.
 set -euo pipefail
 
 ROOT=$(dirname "$(readlink -f "$0")")
@@ -30,4 +31,10 @@ if [ -f "$HYPRLAND_LUA" ] && grep -q '^-- >>> xscale' "$HYPRLAND_LUA"; then
   mv "$HYPRLAND_LUA.xscale-tmp" "$HYPRLAND_LUA"
 fi
 
-echo "xscale is unlinked. Arch's Hyprland and Xwayland: xscale restore (before this, or run bin/xscale restore)"
+rm -rf "$CONFIG/xscale"
+
+if LC_ALL=C pacman -Q hyprland xorg-xwayland 2>/dev/null | grep -qE -- '-[0-9]+\.[0-9]+$'; then
+  echo "xscale is unlinked. Its Hyprland and Xwayland are still installed: $ROOT/bin/xscale restore puts Arch's back"
+else
+  echo "xscale is unlinked."
+fi

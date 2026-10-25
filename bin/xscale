@@ -2,16 +2,25 @@
 # xscale: X11 apps as sharp as Wayland ones, at the right size on every monitor.
 #
 #   xscale status      what is installed and what the running session does
+#   xscale install     put xscale's Hyprland and Xwayland in place of Arch's
+#                      (sudo pacman -U): this repository's prebuilt packages
+#                      for the release Arch has, or, when there are none yet,
+#                      built here. Then log out and back in.
+#                        --no-build    never build here; fail instead
+#                        --noconfirm   ask pacman nothing
+#   xscale restore     put Arch's own Hyprland and Xwayland back
+#   xscale uninstall   restore, then take xscale's links away (uninstall.sh)
 #   xscale settings    tell X11 toolkits the scale they render at: the X
 #                      resources (Xft.dpi, Xcursor.size) and XSETTINGS (GTK),
 #                      on the running X display; run at every login by
 #                      hypr/xscale.lua
-#   xscale build       build the patched Hyprland and Xwayland packages from
-#                      Arch's recipes (pkg/) and the patches (patches/), in
-#                      build/pkg; needs no root
-#   xscale install     install what `xscale build` made (sudo pacman -U); the
-#                      new Hyprland takes over at the next login
-#   xscale restore     put Arch's own Hyprland and Xwayland back
+#   xscale build       build xscale's Hyprland and Xwayland here, no install
+#   xscale recipe NAME DIR
+#                      Arch's recipe for NAME (hyprland or xorg-xwayland) at
+#                      the version Arch has, with xscale's patch, in DIR; says
+#                      the version it makes. Build it with
+#                      GNUPGHOME=DIR/.gnupg makepkg (the keys Arch's recipe
+#                      ships, for the source's signature)
 #
 # X11 has one coordinate space and one DPI for all its clients, so X11 apps
 # render at one scale, the highest monitor's, and are shown at their logical
@@ -21,8 +30,11 @@ set -euo pipefail
 
 ROOT=$(dirname "$(dirname "$(readlink -f "$0")")")
 CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/xscale
-BUILD=$ROOT/build/pkg
-MARKER=/usr/share/hypr/xwayland-scale
+CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/xscale
+STATE=${XDG_STATE_HOME:-$HOME/.local/state}/xscale
+# where the prebuilt packages are released
+REPO=${XSCALE_REPO:-ParkerrDev/xscale}
+PACKAGES=(xorg-xwayland hyprland)
 
 usage() {
   awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
@@ -156,76 +168,206 @@ cmd_settings() {
   echo "xscale: X11 apps on $display render at $scale"
 }
 
-pinned() {
-  sed -n "s/^$1=//p" "$ROOT/pkg/$2/PKGBUILD" | head -1
+
+# Arch's version of NAME in the sync database: what `pacman -Syu` installs
+arch_version() {
+  LC_ALL=C pacman -Si "$1" 2>/dev/null | awk '/^Version / { sub(/^[^:]*: */, ""); print; exit }'
+}
+
+installed_version() {
+  LC_ALL=C pacman -Q "$1" 2>/dev/null | awk '{ print $2 }'
+}
+
+# xscale's builds have a release number with a dot in it: Arch's plus .N
+is_ours() {
+  [[ $1 =~ -[0-9]+\.[0-9]+$ ]]
+}
+
+overlay_value() {
+  sed -n "s/^_xscale_$2=//p" "$ROOT/pkg/$1/overlay.bash" | head -1
+}
+
+# The version of xscale's build of NAME for the version Arch has
+wanted_version() {
+  local arch
+  arch=$(arch_version "$1")
+  [ -n "$arch" ] || die "pacman knows no $1"
+  echo "$arch.$(overlay_value "$1" release)"
+}
+
+cmd_recipe() {
+  local name=${1:-} dir=${2:-} version log
+  [ -f "$ROOT/pkg/$name/overlay.bash" ] || die "recipe: hyprland or xorg-xwayland"
+  [ -n "$dir" ] || die "recipe: say where to write it"
+  # what is there is replaced, so it has to be an earlier recipe or nothing
+  [ ! -e "$dir" ] || [ -f "$dir/PKGBUILD" ] || [ -z "$(ls -A "$dir")" ] || die "$dir holds something other than a recipe"
+  version=$(arch_version "$name")
+  [ -n "$version" ] || die "pacman knows no $name"
+  rm -rf "$dir"
+  # Arch tags each release in the package's own repository; an epoch's
+  # colon becomes a dash
+  log=$(git -c advice.detachedHead=false clone --quiet --depth 1 --branch "${version/:/-}" \
+    "https://gitlab.archlinux.org/archlinux/packaging/packages/$name.git" "$dir" 2>&1) ||
+    die "cannot fetch Arch's recipe for $name $version: $log"
+  rm -rf "$dir/.git" "$dir/.SRCINFO"
+  { echo; cat "$ROOT/pkg/$name/overlay.bash" "$ROOT/pkg/overlay.bash"; } >>"$dir/PKGBUILD"
+  cp "$ROOT/patches/$(overlay_value "$name" patch)" "$dir/"
+  # the source's signature is checked against the keys Arch's recipe ships
+  # (keys/pgp), in a keyring of the recipe's own
+  mkdir -m 700 "$dir/.gnupg"
+  if [ -d "$dir/keys/pgp" ]; then
+    GNUPGHOME=$dir/.gnupg gpg --quiet --batch --import "$dir"/keys/pgp/*.asc 2>/dev/null || true
+    GNUPGHOME=$dir/.gnupg gpgconf --kill all 2>/dev/null || true
+  fi
+  echo "$version.$(overlay_value "$name" release)"
+}
+
+package_file() {
+  echo "$CACHE/packages/$1-$2/$1-$2-$(uname -m).pkg.tar.zst"
+}
+
+# fetch NAME VERSION: xscale's NAME from this repository's release
+# NAME-VERSION, checked against the release's SHA256SUMS. Fails when there is
+# no such release (yet).
+fetch_one() {
+  local name=$1 want=$2 file out url
+  file=$(package_file "$name" "$want")
+  out=$(dirname "$file")
+  url=https://github.com/$REPO/releases/download/$name-$want
+  mkdir -p "$out"
+  curl -fsSL --max-time 30 -o "$out/SHA256SUMS" "$url/SHA256SUMS" 2>/dev/null || return 1
+  grep -q "  ${file##*/}\$" "$out/SHA256SUMS" || return 1
+  echo "xscale: downloading ${file##*/}"
+  curl -fL --max-time 900 --progress-bar -o "$file.part" "$url/${file##*/}" || return 1
+  (cd "$out" && grep "  ${file##*/}\$" SHA256SUMS | sed 's/$/.part/' | sha256sum --check --quiet) ||
+    die "${file##*/} does not match the checksum its release gives"
+  mv "$file.part" "$file"
+}
+
+# build NAME VERSION: xscale's NAME built here, from cmd_recipe
+build_one() {
+  local name=$1 want=$2 dir=$CACHE/build/$1 file missing
+  file=$(package_file "$name" "$want")
+  command -v makepkg >/dev/null || die "building needs makepkg (sudo pacman -S --needed base-devel)"
+  cmd_recipe "$name" "$dir" >/dev/null
+  missing=$(cd "$dir" && makepkg --printsrcinfo | awk '$1 ~ /^(make|check)?depends$/ { print $3 }' | xargs pacman -T | sed 's/[<>=].*//' || true)
+  if [ -n "$missing" ]; then
+    echo "xscale: building $name needs ${missing//$'\n'/ }"
+    # shellcheck disable=SC2086 # one package a word
+    sudo pacman -S --needed --asdeps $missing
+  fi
+  mkdir -p "$(dirname "$file")"
+  echo "xscale: building $name $want, which takes a while (log: $dir.log)"
+  local built=yes
+  (cd "$dir" && GNUPGHOME=$dir/.gnupg PKGDEST=$(dirname "$file") makepkg --force --cleanbuild >"$dir.log" 2>&1) || built=no
+  # gpg may have started a daemon for that keyring
+  GNUPGHOME=$dir/.gnupg gpgconf --kill all 2>/dev/null || true
+  [ "$built" = yes ] || die "$name did not build: the end of $dir.log says why"
+  [ -s "$file" ] || die "the build of $name made no ${file##*/}"
 }
 
 cmd_build() {
-  local name missing
-  command -v makepkg >/dev/null || die "makepkg is needed (base-devel)"
-  for name in hyprland xorg-xwayland; do
-    local installed want
-    installed=$(pacman -Q "$name" 2>/dev/null | awk '{print $2}' | sed 's/-[^-]*$//')
-    want=$(pinned pkgver "$name")
-    if [ -n "$installed" ] && [ "$installed" != "$want" ]; then
-      die "Arch's $name is $installed now, the patch is for $want: pkg/$name and patches/ need refreshing first"
-    fi
+  local name want
+  for name in "${PACKAGES[@]}"; do
+    want=$(wanted_version "$name")
+    build_one "$name" "$want"
+    package_file "$name" "$want"
   done
-  missing=$(cd "$ROOT/pkg/hyprland" && pacman -T cmake glaze hyprland-protocols hyprwayland-scanner meson ninja xorgproto \
-    xtrans libxkbfile xorg-font-util wayland-protocols mesa-libgl || true)
-  [ -z "$missing" ] || die "missing build packages: $missing (omarchy pkg add ...)"
-
-  mkdir -p "$BUILD"
-  for name in xorg-xwayland hyprland; do
-    rm -rf "${BUILD:?}/$name"
-    mkdir -p "$BUILD/$name"
-    cp "$ROOT/pkg/$name/PKGBUILD" "$BUILD/$name/"
-    cp "$ROOT"/patches/*.patch "$BUILD/$name/"
-    echo "xscale: building $name"
-    (cd "$BUILD/$name" && makepkg -f --skippgpcheck --noconfirm >"$BUILD/$name.log" 2>&1) ||
-      die "$name did not build, see $BUILD/$name.log"
-  done
-  find "$BUILD" -maxdepth 2 -name '*.pkg.tar.zst' -printf '%p\n'
-}
-
-packages() {
-  find "$BUILD" -maxdepth 2 -name '*.pkg.tar.zst' \( -name 'hyprland-[0-9]*' -o -name 'xorg-xwayland-[0-9]*' \) | sort
 }
 
 cmd_install() {
-  local files
-  mapfile -t files < <(packages)
-  [ "${#files[@]}" -gt 0 ] || die "nothing built yet: xscale build"
-  echo "xscale: installing ${files[*]##*/}"
-  sudo pacman -U "${files[@]}"
-  echo "xscale: log out and back in to use the new Hyprland and Xwayland"
+  local build=yes confirm=() name want have file files=()
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --no-build) build=no ;;
+      --noconfirm) confirm=(--noconfirm) ;;
+      *) die "install takes --no-build and --noconfirm" ;;
+    esac
+    shift
+  done
+  [ "$(id -u)" != 0 ] || die "run it as yourself: it asks for sudo when it needs it"
+  for name in "${PACKAGES[@]}"; do
+    want=$(wanted_version "$name")
+    have=$(installed_version "$name")
+    if [ "$have" = "$want" ]; then
+      echo "xscale: $name $want is in place"
+      continue
+    fi
+    if is_ours "$have"; then have=${have%.*}; fi
+    # A build for a newer Hyprland than the one here can need newer libraries
+    [ -z "$have" ] || [ "$have" = "${want%.*}" ] ||
+      die "$name is $have here and ${want%.*} in Arch: update first (omarchy update), then xscale install"
+    file=$(package_file "$name" "$want")
+    if [ ! -s "$file" ] && ! fetch_one "$name" "$want"; then
+      [ "$build" = yes ] || die "there is no prebuilt $name $want yet; xscale install builds it here"
+      echo "xscale: there is no prebuilt $name $want yet, so it is built here"
+      build_one "$name" "$want"
+    fi
+    files+=("$file")
+  done
+  # X11 GTK apps learn their scale from XSETTINGS
+  if ! pacman -T xsettingsd >/dev/null; then
+    sudo pacman -S --needed "${confirm[@]}" xsettingsd
+  fi
+  mkdir -p "$STATE"
+  touch "$STATE/packages"
+  [ "${#files[@]}" -gt 0 ] || return 0
+  sudo pacman -U --needed "${confirm[@]}" "${files[@]}"
+  echo "xscale: installed. Log out and back in, and X11 apps are drawn at their monitors' scale."
 }
 
 cmd_restore() {
-  echo "xscale: putting Arch's hyprland and xorg-xwayland back"
-  sudo pacman -S hyprland xorg-xwayland
+  local name targets=()
+  rm -f "$STATE/packages"
+  for name in "${PACKAGES[@]}"; do
+    if is_ours "$(installed_version "$name")"; then targets+=("$name"); fi
+  done
+  if [ "${#targets[@]}" -eq 0 ]; then
+    echo "xscale: Arch's Hyprland and Xwayland are in place"
+    return 0
+  fi
+  echo "xscale: putting Arch's ${targets[*]} back"
+  sudo pacman -S "${targets[@]}"
+  echo "xscale: log out and back in to use them"
+}
+
+cmd_uninstall() {
+  cmd_restore
+  "$ROOT/uninstall.sh"
+  rm -rf "$CACHE" "$STATE"
+  echo "xscale: gone. This copy of it can go too: rm -rf $ROOT"
 }
 
 cmd_status() {
-  local hypr xwl scale display
-  hypr=$(pacman -Q hyprland 2>/dev/null || echo "hyprland not installed")
-  xwl=$(pacman -Q xorg-xwayland 2>/dev/null || echo "xorg-xwayland not installed")
-  echo "installed:  $hypr$([ -e "$MARKER" ] && echo ' (xscale)'), $xwl$(case $xwl in *.1) echo ' (xscale)' ;; esac)"
+  local name have arch scale display
+  for name in "${PACKAGES[@]}"; do
+    have=$(installed_version "$name")
+    arch=$(arch_version "$name")
+    printf '%-14s %s' "$name" "${have:-not installed}"
+    if is_ours "$have"; then printf ' (xscale)'; else printf " (Arch's)"; fi
+    if [ -n "$arch" ] && [ "${have%.*}" != "$arch" ] && [ "$have" != "$arch" ]; then printf ', Arch has %s' "$arch"; fi
+    echo
+  done
   if hyprctl version >/dev/null 2>&1; then
     scale=$(x11_scale)
     display=$(x11_display || echo none)
-    echo "session:    X11 apps render at $scale on display $display"
+    echo "session        X11 apps render at $scale on display $display"
   fi
-  [ -e "$CONFIG/Xresources" ] && echo "settings:   $(grep -v '^!' "$CONFIG/Xresources" | tr '\n' ' ')"
+  [ -e "$CONFIG/Xresources" ] && echo "settings       $(grep -v '^!' "$CONFIG/Xresources" | tr '\n' ' ')"
   return 0
 }
 
 case "${1:-}" in
   status) cmd_status ;;
+  install) shift; cmd_install "$@" ;;
+  restore) cmd_restore ;;
+  uninstall) cmd_uninstall ;;
   settings) cmd_settings ;;
   build) cmd_build ;;
-  install) cmd_install ;;
-  restore) cmd_restore ;;
+  recipe) shift; cmd_recipe "$@" ;;
   -h | --help | help | "") usage ;;
-  *) usage >&2; exit 2 ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
 esac

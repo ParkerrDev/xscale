@@ -1,0 +1,33 @@
+name: checks
+# The scripts and the Lua, and whether both patches still go onto Arch's
+# current recipes: each recipe is made as `xscale install` makes it, its
+# sources fetched and checked (the Xwayland tarball's signature too), and the
+# patch applied. makepkg will not run as root, so that part runs as a user of
+# its own.
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "41 4 * * *"
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Tools
+        run: |
+          pacman -Syu --noconfirm --needed git base-devel shellcheck lua
+          useradd -m builder
+      - uses: actions/checkout@v4
+      - name: Shell and Lua
+        run: |
+          shellcheck bin/xscale install.sh uninstall.sh hooks/post-update.sh session/uwsm-env
+          luac -p hypr/xscale.lua
+      - name: The patches still fit Arch's recipes
+        run: |
+          chown -R builder .
+          for name in xorg-xwayland hyprland; do
+            su builder -c "bin/xscale recipe $name /tmp/recipe-$name"
+            su builder -c "cd /tmp/recipe-$name && GNUPGHOME=/tmp/recipe-$name/.gnupg makepkg --nobuild --nodeps"
+          done

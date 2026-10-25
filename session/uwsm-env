@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # xscale: Steam's interface scale for the whole session, from its start.
 # Launchers hand their own environment to what they start, and they start
 # before Hyprland's config runs, so a variable Hyprland sets later never
