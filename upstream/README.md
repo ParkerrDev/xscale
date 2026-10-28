@@ -1,13 +1,25 @@
 # Upstream
 
 The same change, as each project takes it, rebased on its main branch of
-2026-10-18 and built there. Nothing here has been submitted yet.
+2026-10-18 and built there. None of these three has been submitted yet.
 
 | Order | Project | Where | Patches | Description |
 |---|---|---|---|---|
 | 1 | wayland-protocols | gitlab.freedesktop.org/wayland/wayland-protocols | [wayland-protocols/](wayland-protocols/) | [MR.md](wayland-protocols/MR.md) |
 | 2 | Xwayland | gitlab.freedesktop.org/xorg/xserver | [xserver/](xserver/) | [MR.md](xserver/MR.md) |
 | 3 | Hyprland | github.com/hyprwm/Hyprland | [hyprland/](hyprland/) | [PR.md](hyprland/PR.md) |
+
+Omarchy builds its own Hyprland (`pkgbuilds/hyprland` in omacom/omarchy-pkgs),
+so the Hyprland half can reach every Omarchy machine without waiting on the
+others. [omarchy/xwayland-scale.patch](omarchy/xwayland-scale.patch) is the
+change as proposed there in
+[omacom/omarchy-pkgs#1757](https://github.com/omacom/omarchy-pkgs/pull/1757):
+`patches/hyprland-xwayland-scale.patch` without the `xwayland_shell_v1`
+version 2 part. Hyprland lays X11 out at `xwayland:scale` and scales X11
+windows and cursors down to their logical size itself, so it works with
+Arch's stock Xwayland and changes no protocol. With the version 2 part on top,
+an Xwayland that takes the scale shows its windows at their logical size
+itself, and Hyprland leaves them as they come.
 
 The protocol goes first: Xwayland and Hyprland both implement its version 2.
 The Xwayland MR can be opened at the same time and linked from the protocol

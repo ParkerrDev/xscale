@@ -158,7 +158,7 @@ Measured in a nested Hyprland with a monitor at 1.6 and a second at 1, with `too
 
 <br>
 
-The change is written to go into wayland-protocols, Xwayland and Hyprland, so that one day none of this is needed. [upstream/](upstream/README.md) has each part rebased on its project's main branch and built there, with the text of each merge request. None has been submitted yet.
+The change is written to go into wayland-protocols, Xwayland and Hyprland, so that one day none of this is needed. [upstream/](upstream/README.md) has each part rebased on its project's main branch and built there, with the text of each merge request. None has been submitted yet. The Hyprland half, without the protocol part, is proposed for Omarchy's own Hyprland in [omacom/omarchy-pkgs#1757](https://github.com/omacom/omarchy-pkgs/pull/1757).
 
 </details>
 

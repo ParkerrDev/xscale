@@ -1,0 +1,961 @@
+Add xwayland:scale, one scale for X11 clients on every monitor
+
+X11 has one coordinate space and one DPI for all its clients, so an X11
+window cannot take the scale of the monitor it is on. X11 apps either render
+at 1 and are upscaled, which is blurry, or with force_zero_scaling render at
+each monitor's pixels and need GDK_SCALE or Xft.dpi set by hand, which is
+right on one monitor and wrong on the others.
+
+xwayland:scale is the one scale every X11 client renders at: -1 is the
+highest monitor scale rounded up to a whole number, -2 the highest monitor
+scale as it is, or a number. 0, the default, changes nothing. Hyprland lays
+the X11 screen out at that scale and scales X11 windows down to their
+logical size itself, so a window is pixel for pixel on a monitor of that
+scale, downscaled with linear filtering on a lower one, and never upscaled.
+It needs nothing of Xwayland and changes no protocol. An X11 cursor is
+shown the same way, at its size divided by the X11 scale of the window under
+it, so an app that draws its cursor at the X11 scale gets one the size of
+Hyprland's own.
+
+The scale is laid out with the monitors, so a config reload that changes
+only xwayland:scale lays them out again, as a monitor change does.
+
+The window rule xwayland_unscaled, and the switch xwayland:unscaled_windows,
+keep an X11 window that draws at 1 whatever it is told (Steam's updater) at
+its own size. Their members go last in their classes, so plugins built
+against Hyprland's headers before this keep their layout.
+
+From https://github.com/ParkerrDev/xscale.
+
+diff --git a/src/config/lua/bindings/LuaBindingsInternal.hpp b/src/config/lua/bindings/LuaBindingsInternal.hpp
+index 102ed7f..6fbc498 100644
+--- a/src/config/lua/bindings/LuaBindingsInternal.hpp
++++ b/src/config/lua/bindings/LuaBindingsInternal.hpp
+@@ -84,6 +84,7 @@ namespace Config::Lua::Bindings::Internal {
+         {"focus_on_activate", []() -> ILuaConfigValue* { return new CLuaConfigBool(false); }, WE::WINDOW_RULE_EFFECT_FOCUS_ON_ACTIVATE},
+         {"keep_aspect_ratio", []() -> ILuaConfigValue* { return new CLuaConfigBool(false); }, WE::WINDOW_RULE_EFFECT_KEEP_ASPECT_RATIO},
+         {"nearest_neighbor", []() -> ILuaConfigValue* { return new CLuaConfigBool(false); }, WE::WINDOW_RULE_EFFECT_NEAREST_NEIGHBOR},
++        {"xwayland_unscaled", []() -> ILuaConfigValue* { return new CLuaConfigBool(false); }, WE::WINDOW_RULE_EFFECT_XWAYLAND_UNSCALED},
+         {"no_anim", []() -> ILuaConfigValue* { return new CLuaConfigBool(false); }, WE::WINDOW_RULE_EFFECT_NO_ANIM},
+         {"no_blur", []() -> ILuaConfigValue* { return new CLuaConfigBool(false); }, WE::WINDOW_RULE_EFFECT_NO_BLUR},
+         {"no_dim", []() -> ILuaConfigValue* { return new CLuaConfigBool(false); }, WE::WINDOW_RULE_EFFECT_NO_DIM},
+diff --git a/src/config/shared/actions/ConfigActions.cpp b/src/config/shared/actions/ConfigActions.cpp
+index cf38816..cff9217 100644
+--- a/src/config/shared/actions/ConfigActions.cpp
++++ b/src/config/shared/actions/ConfigActions.cpp
+@@ -806,6 +806,11 @@ ActionResult Actions::setProp(const std::string& PROP, const std::string& VAL, s
+             parsePropTrivial(PWINDOW->m_ruleApplicator->keepAspectRatio(), VAL);
+         else if (PROP == "nearest_neighbor")
+             parsePropTrivial(PWINDOW->m_ruleApplicator->nearestNeighbor(), VAL);
++        else if (PROP == "xwayland_unscaled") {
++            const auto X11SIZE = PWINDOW->m_reportedSize;
++            parsePropTrivial(PWINDOW->m_ruleApplicator->xwaylandUnscaled(), VAL);
++            PWINDOW->onX11PixelScaleChanged(X11SIZE);
++        }
+         else if (PROP == "no_anim")
+             parsePropTrivial(PWINDOW->m_ruleApplicator->noAnim(), VAL);
+         else if (PROP == "no_blur")
+diff --git a/src/config/shared/monitor/MonitorRuleManager.cpp b/src/config/shared/monitor/MonitorRuleManager.cpp
+index 3805739..1bddae7 100644
+--- a/src/config/shared/monitor/MonitorRuleManager.cpp
++++ b/src/config/shared/monitor/MonitorRuleManager.cpp
+@@ -176,7 +176,8 @@ void CMonitorRuleManager::ensureMonitorStatus() {
+ 
+     m_reloadScheduled = false;
+ 
+-    if (monsForRefresh.empty())
++    // the X11 scale is laid out with the monitors, so a change to xwayland:scale alone lays them out again
++    if (monsForRefresh.empty() && !State::monitorLayoutController()->xwaylandScaleChanged())
+         return;
+ 
+     for (const auto& m : monsForRefresh) {
+@@ -194,6 +195,12 @@ void CMonitorRuleManager::ensureMonitorStatus() {
+     State::monitorLayoutController()->arrange();
+     State::monitorLayoutController()->checkOverlapsAndNotify();
+ 
++    // X11 windows take their scale and place from the arrangement just made
++    for (auto const& w : Desktop::windowState()->windows()) {
++        if (w->m_isX11 && w->m_isMapped)
++            w->sendWindowSize(true);
++    }
++
+     for (const auto& m : monsForRefresh) {
+         if (!m->m_output)
+             continue;
+diff --git a/src/config/values/ConfigValues.cpp b/src/config/values/ConfigValues.cpp
+index 4954aeb..b91b90b 100644
+--- a/src/config/values/ConfigValues.cpp
++++ b/src/config/values/ConfigValues.cpp
+@@ -547,6 +547,16 @@ std::vector<SP<IValue>> Values::getConfigValues() {
+         MS<Bool>("xwayland:enabled", "allow running applications using X11", true),
+         MS<Bool>("xwayland:use_nearest_neighbor", "uses the nearest neighbor filtering for xwayland apps, making them pixelated rather than blurry", true),
+         MS<Bool>("xwayland:force_zero_scaling", "forces a scale of 1 on xwayland windows on scaled displays.", false),
++        MS<Float>("xwayland:scale",
++                  "the one scale every X11 client renders at, on every monitor, each window being shown from it at its logical size: sharp on monitors of "
++                  "that scale, downscaled on lower ones. 0 for none (force_zero_scaling then applies), -1 the highest monitor scale rounded up to a whole "
++                  "number (for toolkits that only scale by whole numbers), -2 the highest monitor scale as it is. Tell toolkits the scale too (Xft.dpi, "
++                  "XSETTINGS).",
++                  0, {.min = -2, .max = 8}),
++        MS<Bool>("xwayland:unscaled_windows",
++                 "whether the xwayland_unscaled window rule applies: an X11 window that draws at 1x whatever it is told, shown at its X11 size in "
++                 "logical pixels, enlarged as a HiDPI desktop shows an app that was never made for it",
++                 true),
+         MS<Bool>("xwayland:create_abstract_socket", "Create the abstract Unix domain socket for XWayland", false),
+ 
+         /*
+diff --git a/src/debug/HyprCtl.cpp b/src/debug/HyprCtl.cpp
+index 060e25b..9f971ff 100644
+--- a/src/debug/HyprCtl.cpp
++++ b/src/debug/HyprCtl.cpp
+@@ -1588,6 +1588,8 @@ static std::string dispatchGetProp(eHyprCtlOutputFormat format, std::string requ
+         return windowPropToString(PWINDOW->m_ruleApplicator->keepAspectRatio());
+     else if (PROP == "nearest_neighbor")
+         return windowPropToString(PWINDOW->m_ruleApplicator->nearestNeighbor());
++    else if (PROP == "xwayland_unscaled")
++        return windowPropToString(PWINDOW->m_ruleApplicator->xwaylandUnscaled());
+     else if (PROP == "no_anim")
+         return windowPropToString(PWINDOW->m_ruleApplicator->noAnim());
+     else if (PROP == "no_blur")
+diff --git a/src/desktop/rule/windowRule/WindowRule.cpp b/src/desktop/rule/windowRule/WindowRule.cpp
+index a3f8858..809be25 100644
+--- a/src/desktop/rule/windowRule/WindowRule.cpp
++++ b/src/desktop/rule/windowRule/WindowRule.cpp
+@@ -236,6 +236,7 @@ static std::expected<WindowRuleEffectValue, std::string> parseWindowRuleEffect(C
+         case WINDOW_RULE_EFFECT_FOCUS_ON_ACTIVATE:
+         case WINDOW_RULE_EFFECT_KEEP_ASPECT_RATIO:
+         case WINDOW_RULE_EFFECT_NEAREST_NEIGHBOR:
++        case WINDOW_RULE_EFFECT_XWAYLAND_UNSCALED:
+         case WINDOW_RULE_EFFECT_NO_ANIM:
+         case WINDOW_RULE_EFFECT_NO_BLUR:
+         case WINDOW_RULE_EFFECT_NO_DIM:
+diff --git a/src/desktop/rule/windowRule/WindowRuleApplicator.cpp b/src/desktop/rule/windowRule/WindowRuleApplicator.cpp
+index 95524e5..267c784 100644
+--- a/src/desktop/rule/windowRule/WindowRuleApplicator.cpp
++++ b/src/desktop/rule/windowRule/WindowRuleApplicator.cpp
+@@ -43,7 +43,8 @@ std::unordered_set<CWindowRuleEffectContainer::storageType> CWindowRuleApplicato
+                    std::pair{std::ref(m_alphaFullscreen), [this] { return alphaFullscreenEffect(); }}, std::pair{std::ref(m_allowsInput), [this] { return allowsInputEffect(); }},
+                    std::pair{std::ref(m_decorate), [this] { return decorateEffect(); }}, std::pair{std::ref(m_focusOnActivate), [this] { return focusOnActivateEffect(); }},
+                    std::pair{std::ref(m_keepAspectRatio), [this] { return keepAspectRatioEffect(); }},
+-                   std::pair{std::ref(m_nearestNeighbor), [this] { return nearestNeighborEffect(); }}, std::pair{std::ref(m_noAnim), [this] { return noAnimEffect(); }},
++                   std::pair{std::ref(m_nearestNeighbor), [this] { return nearestNeighborEffect(); }},
++                   std::pair{std::ref(m_xwaylandUnscaled), [this] { return xwaylandUnscaledEffect(); }}, std::pair{std::ref(m_noAnim), [this] { return noAnimEffect(); }},
+                    std::pair{std::ref(m_noBlur), [this] { return noBlurEffect(); }}, std::pair{std::ref(m_noDim), [this] { return noDimEffect(); }},
+                    std::pair{std::ref(m_noFocus), [this] { return noFocusEffect(); }}, std::pair{std::ref(m_noMaxSize), [this] { return noMaxSizeEffect(); }},
+                    std::pair{std::ref(m_noShadow), [this] { return noShadowEffect(); }}, std::pair{std::ref(m_noShortcutsInhibit), [this] { return noShortcutsInhibitEffect(); }},
+@@ -260,6 +261,11 @@ CWindowRuleApplicator::SRuleResult CWindowRuleApplicator::applyDynamicRule(const
+                 m_nearestNeighbor.second |= rule->getPropertiesMask();
+                 break;
+             }
++            case WINDOW_RULE_EFFECT_XWAYLAND_UNSCALED: {
++                m_xwaylandUnscaled.first.set(std::get<bool>(value), Types::PRIORITY_WINDOW_RULE);
++                m_xwaylandUnscaled.second |= rule->getPropertiesMask();
++                break;
++            }
+             case WINDOW_RULE_EFFECT_NO_ANIM: {
+                 m_noAnim.first.set(std::get<bool>(value), Types::PRIORITY_WINDOW_RULE);
+                 m_noAnim.second |= rule->getPropertiesMask();
+@@ -520,6 +526,9 @@ bool CWindowRuleApplicator::readStaticRules(bool preRead) {
+         if (!preRead)
+             ruleEngine()->unregisterRule(wr);
+     }
++
++    // the window is mapped as it is now
++    m_x11UnscaledShown = m_window->x11Unscaled();
+     return (propsToRecheck != RULE_PROP_NONE);
+ }
+ 
+@@ -549,6 +558,7 @@ void CWindowRuleApplicator::propertiesChanged(std::underlying_type_t<eRuleProper
+         return;
+ 
+     bool                                                        needsRelayout         = false;
++    const Vector2D                                              X11SIZE               = m_window->m_reportedSize;
+     std::unordered_set<CWindowRuleEffectContainer::storageType> effectsNeedingRecheck = resetProps(props);
+ 
+     for (const auto& r : ruleEngine()->rules()) {
+@@ -578,6 +588,10 @@ void CWindowRuleApplicator::propertiesChanged(std::underlying_type_t<eRuleProper
+         needsRelayout  = needsRelayout || RES.needsRelayout;
+     }
+ 
++    // a rule, or xwayland:unscaled_windows at a reload, changed it
++    if (m_window->m_isX11 && m_window->x11Unscaled() != m_x11UnscaledShown)
++        m_window->onX11PixelScaleChanged(X11SIZE);
++
+     m_window->updateWindowData();
+     m_window->updateWindowDecos();
+     m_window->updateDecorationValues();
+diff --git a/src/desktop/rule/windowRule/WindowRuleApplicator.hpp b/src/desktop/rule/windowRule/WindowRuleApplicator.hpp
+index 202cf8d..722932b 100644
+--- a/src/desktop/rule/windowRule/WindowRuleApplicator.hpp
++++ b/src/desktop/rule/windowRule/WindowRuleApplicator.hpp
+@@ -140,14 +140,21 @@ namespace Desktop::Rule {
+         std::vector<std::pair<std::string, std::underlying_type_t<eRuleProperty>>> m_dynamicTags;
+         CTagKeeper                                                                 m_tagKeeper;
+ 
+-#undef COMMA
+-#undef DEFINE_PROP
+-
+       private:
+         PHLWINDOWREF                          m_window;
+         std::vector<SP<CWindowRule>>          m_execRules;
+         std::underlying_type_t<eRuleProperty> propsToRecheck = RULE_PROP_NONE;
+ 
++        // last, so that plugins built without them read the members above where they were
++        DEFINE_PROP(bool, xwaylandUnscaled, false, WINDOW_RULE_EFFECT_XWAYLAND_UNSCALED)
++        // whether the window is shown unscaled now (CWindow::x11Unscaled when it was last applied)
++        bool m_x11UnscaledShown = false;
++
++#undef COMMA
++#undef DEFINE_PROP
++
++      private:
++
+         struct SRuleResult {
+             bool needsRelayout = false;
+             bool tagsChanged   = false;
+diff --git a/src/desktop/rule/windowRule/WindowRuleEffectContainer.cpp b/src/desktop/rule/windowRule/WindowRuleEffectContainer.cpp
+index 72ca1aa..1330761 100644
+--- a/src/desktop/rule/windowRule/WindowRuleEffectContainer.cpp
++++ b/src/desktop/rule/windowRule/WindowRuleEffectContainer.cpp
+@@ -68,12 +68,13 @@ static const std::vector<std::string> EFFECT_STRINGS = {
+     "scroll_touchpad",        //
+     "stay_focused",           //
+     "confine_pointer",        //
++    "xwayland_unscaled",      //
+     "__internal_last_static", //
+ };
+ 
+ // This is here so that if we change the rules, we get reminded to update
+ // the strings.
+-static_assert(WINDOW_RULE_EFFECT_LAST_STATIC == 58);
++static_assert(WINDOW_RULE_EFFECT_LAST_STATIC == 59);
+ 
+ CWindowRuleEffectContainer::CWindowRuleEffectContainer() : IEffectContainer<eWindowRuleEffect>(std::vector<std::string>{EFFECT_STRINGS}) {
+     ;
+diff --git a/src/desktop/rule/windowRule/WindowRuleEffectContainer.hpp b/src/desktop/rule/windowRule/WindowRuleEffectContainer.hpp
+index 7636325..e7c6113 100644
+--- a/src/desktop/rule/windowRule/WindowRuleEffectContainer.hpp
++++ b/src/desktop/rule/windowRule/WindowRuleEffectContainer.hpp
+@@ -69,6 +69,8 @@ namespace Desktop::Rule {
+         WINDOW_RULE_EFFECT_SCROLL_TOUCHPAD,
+         WINDOW_RULE_EFFECT_STAY_FOCUSED,
+         WINDOW_RULE_EFFECT_CONFINE_POINTER,
++        // last, so that plugins built without it keep the numbers of the others
++        WINDOW_RULE_EFFECT_XWAYLAND_UNSCALED,
+ 
+         WINDOW_RULE_EFFECT_LAST_STATIC,
+     };
+diff --git a/src/desktop/view/Window.cpp b/src/desktop/view/Window.cpp
+index 8836f73..0d2a37b 100644
+--- a/src/desktop/view/Window.cpp
++++ b/src/desktop/view/Window.cpp
+@@ -1686,14 +1686,11 @@ Vector2D CWindow::realToReportSize() {
+     if (!m_isX11)
+         return m_realSize->goal().clamp(Vector2D{0, 0}, Math::VECTOR2D_MAX);
+ 
+-    static auto PXWLFORCESCALEZERO = CConfigValue<Config::INTEGER>("xwayland:force_zero_scaling");
++    const auto REPORTSIZE = m_realSize->goal().clamp(Vector2D{1, 1}, Math::VECTOR2D_MAX);
+ 
+-    const auto  REPORTSIZE = m_realSize->goal().clamp(Vector2D{1, 1}, Math::VECTOR2D_MAX);
+-    const auto  PMONITOR   = m_monitor.lock();
+-
+-    if (*PXWLFORCESCALEZERO && PMONITOR)
++    if (const float SCALE = x11PixelScale(); SCALE != 1.F)
+         // Keep X11 configure sizes integral to avoid truncation (e.g. 2879.999 -> 2879) later in xcb.
+-        return (REPORTSIZE * PMONITOR->m_scale).round();
++        return (REPORTSIZE * SCALE).round();
+ 
+     return REPORTSIZE;
+ }
+@@ -1706,27 +1703,77 @@ Vector2D CWindow::realToReportPosition() {
+ }
+ 
+ Vector2D CWindow::xwaylandSizeToReal(Vector2D size) {
+-    static auto PXWLFORCESCALEZERO = CConfigValue<Config::INTEGER>("xwayland:force_zero_scaling");
++    const auto SIZE = size.clamp(Vector2D{1, 1}, Math::VECTOR2D_MAX);
+ 
+-    const auto  PMONITOR = m_monitor.lock();
+-    const auto  SIZE     = size.clamp(Vector2D{1, 1}, Math::VECTOR2D_MAX);
+-    const auto  SCALE    = *PXWLFORCESCALEZERO && PMONITOR ? PMONITOR->m_scale : 1.0f;
+-
+-    return SIZE / SCALE;
++    return SIZE / x11PixelScale();
+ }
+ 
+ Vector2D CWindow::xwaylandPositionToReal(Vector2D pos) {
++    // a menu or tooltip of an app that draws unscaled lies in its window's pixels, enlarged with them
++    if (isX11OverrideRedirect()) {
++        if (const auto OWNER = x11UnscaledOwner(); OWNER && OWNER->m_xwaylandSurface)
++            return OWNER->m_realPosition->goal() + (pos - OWNER->m_xwaylandSurface->m_geometry.pos());
++    }
+     return g_pXWaylandManager->xwaylandToWaylandCoords(pos, m_monitor.lock());
+ }
+ 
+-void CWindow::updateX11SurfaceScale() {
+-    static auto PXWLFORCESCALEZERO = CConfigValue<Config::INTEGER>("xwayland:force_zero_scaling");
++float CWindow::x11PixelScale() {
++    const auto PMONITOR = m_monitor.lock();
++    if (!m_isX11 || !PMONITOR)
++        return 1.F;
+ 
+-    m_X11SurfaceScaledBy = 1.0f;
+-    if (m_isX11 && *PXWLFORCESCALEZERO) {
+-        if (const auto PMONITOR = m_monitor.lock(); PMONITOR)
+-            m_X11SurfaceScaledBy = PMONITOR->m_scale;
++    return x11Unscaled() ? 1.F : PMONITOR->m_xwaylandScale;
++}
++
++bool CWindow::x11Unscaled() {
++    // An X11 app that draws at 1x whatever it is told (Steam's updater, an old Xlib or SDL program)
++    // would come out at 1 / scale of its size: it is shown at its X11 size in logical pixels
++    // instead, its pixels enlarged, as a HiDPI desktop shows an app that was never made for it.
++    static auto PUNSCALED = CConfigValue<Config::BOOL>("xwayland:unscaled_windows");
++    if (!m_isX11 || !*PUNSCALED)
++        return false;
++    return (m_ruleApplicator && m_ruleApplicator->xwaylandUnscaled().valueOrDefault()) || (isX11OverrideRedirect() && x11UnscaledOwner());
++}
++
++PHLWINDOW CWindow::x11UnscaledOwner() {
++    if (!m_isX11 || !m_xwaylandSurface)
++        return nullptr;
++
++    const auto PID = getPID();
++    if (PID <= 0)
++        return nullptr;
++
++    // of the app's windows that draw unscaled, the one this window lies in, or else any
++    PHLWINDOW any;
++    for (auto const& w : Desktop::windowState()->windows()) {
++        if (w.get() == this || !w->m_isX11 || !w->m_isMapped || w->isX11OverrideRedirect() || !w->m_xwaylandSurface || !w->m_ruleApplicator)
++            continue;
++        if (!w->m_ruleApplicator->xwaylandUnscaled().valueOrDefault() || w->getPID() != PID)
++            continue;
++        if (w->m_xwaylandSurface->m_geometry.containsPoint(m_xwaylandSurface->m_geometry.pos()))
++            return w;
++        any = w;
+     }
++    return any;
++}
++
++void CWindow::onX11PixelScaleChanged(Vector2D x11Size) {
++    if (m_ruleApplicator)
++        m_ruleApplicator->m_x11UnscaledShown = x11Unscaled();
++    updateX11SurfaceScale();
++    if (m_isX11 && m_isFloating && x11Size.x > 1 && x11Size.y > 1)
++        layoutTarget()->setPositionGlobal(CBox{m_realPosition->goal(), xwaylandSizeToReal(x11Size)});
++    sendWindowSize(true);
++}
++
++void CWindow::updateX11SurfaceScale() {
++    // An X11 surface's pixels to a logical pixel: the X11 scale, or below 1 for a window drawing
++    // unscaled, which is enlarged by as much
++    m_X11SurfaceScaledBy = 1.0f;
++    if (!m_isX11 || !m_monitor.lock())
++        return;
++
++    m_X11SurfaceScaledBy = x11PixelScale();
+ }
+ 
+ void CWindow::sendWindowSize(bool force) {
+@@ -2546,11 +2593,8 @@ void CWindow::mapWindow() {
+     if (m_workspace)
+         m_workspace->updateWindows();
+ 
+-    if (PMONITOR && isX11OverrideRedirect()) {
+-        static auto PXWLFORCESCALEZERO = CConfigValue<Config::INTEGER>("xwayland:force_zero_scaling");
+-        if (*PXWLFORCESCALEZERO)
+-            m_X11SurfaceScaledBy = PMONITOR->m_scale;
+-    }
++    if (PMONITOR && isX11OverrideRedirect())
++        updateX11SurfaceScale();
+ 
+     Event::bus()->m_events.window.openLate.emit(m_self.lock());
+ }
+@@ -2854,12 +2898,9 @@ void CWindow::unmanagedSetGeometry() {
+         return;
+     }
+ 
+-    static auto PXWLFORCESCALEZERO = CConfigValue<Config::INTEGER>("xwayland:force_zero_scaling");
+-
+-    const auto  PMONITOR       = m_monitor.lock();
+-    const auto  LOGICALPOS     = g_pXWaylandManager->xwaylandToWaylandCoords(m_xwaylandSurface->m_geometry.pos(), PMONITOR);
+-    const auto  XWLSCALE       = (*PXWLFORCESCALEZERO && PMONITOR) ? PMONITOR->m_scale : 1.0;
+-    const auto  LOGICALGEOSIZE = m_xwaylandSurface->m_geometry.size() / XWLSCALE;
++    const auto LOGICALPOS     = xwaylandPositionToReal(m_xwaylandSurface->m_geometry.pos());
++    const auto XWLSCALE       = x11PixelScale();
++    const auto LOGICALGEOSIZE = m_xwaylandSurface->m_geometry.size() / XWLSCALE;
+ 
+     if (abs(std::floor(POS.x) - LOGICALPOS.x) > 2 || abs(std::floor(POS.y) - LOGICALPOS.y) > 2 || abs(std::floor(SIZ.x) - LOGICALGEOSIZE.x) > 2 ||
+         abs(std::floor(SIZ.y) - LOGICALGEOSIZE.y) > 2) {
+@@ -2893,7 +2934,10 @@ std::optional<Vector2D> CWindow::minSize() {
+     if ((m_isX11 && !hasSizeHints) || (!m_isX11 && !hasTopLevel))
+         return std::nullopt;
+ 
+-    Vector2D minSize = m_isX11 ? Vector2D(m_xwaylandSurface->m_sizeHints->min_width, m_xwaylandSurface->m_sizeHints->min_height) : m_xdgSurface->m_toplevel->layoutMinSize();
++    // X11 size hints are in X11 pixels, the logical ones times this window's X11 scale
++    const auto XWLSCALE = x11PixelScale();
++    Vector2D   minSize =
++        m_isX11 ? Vector2D(m_xwaylandSurface->m_sizeHints->min_width, m_xwaylandSurface->m_sizeHints->min_height) / XWLSCALE : m_xdgSurface->m_toplevel->layoutMinSize();
+ 
+     minSize = minSize.clamp({1, 1});
+ 
+@@ -2913,10 +2957,11 @@ std::optional<Vector2D> CWindow::maxSize() {
+ 
+     Vector2D maxSize = m_isX11 ? Vector2D(m_xwaylandSurface->m_sizeHints->max_width, m_xwaylandSurface->m_sizeHints->max_height) : m_xdgSurface->m_toplevel->layoutMaxSize();
+ 
+-    if (maxSize.x < 5)
+-        maxSize.x = NO_MAX_SIZE_LIMIT;
+-    if (maxSize.y < 5)
+-        maxSize.y = NO_MAX_SIZE_LIMIT;
++    // X11 size hints are in X11 pixels, the logical ones times this window's X11 scale
++    const auto XWLSCALE = x11PixelScale();
++
++    maxSize.x = maxSize.x < 5 ? NO_MAX_SIZE_LIMIT : maxSize.x / XWLSCALE;
++    maxSize.y = maxSize.y < 5 ? NO_MAX_SIZE_LIMIT : maxSize.y / XWLSCALE;
+ 
+     return maxSize;
+ }
+diff --git a/src/desktop/view/Window.hpp b/src/desktop/view/Window.hpp
+index 94681cc..4bfcbc8 100644
+--- a/src/desktop/view/Window.hpp
++++ b/src/desktop/view/Window.hpp
+@@ -409,6 +409,16 @@ namespace Desktop::View {
+         Vector2D                          xwaylandSizeToReal(Vector2D size);
+         Vector2D                          xwaylandPositionToReal(Vector2D size);
+         void                              updateX11SurfaceScale();
++        // X11 pixels to a logical pixel in this window: the monitor's X11 scale, or 1 where the
++        // window draws at 1x whatever it is told (xwayland_unscaled) and is enlarged instead
++        float                             x11PixelScale();
++        // whether this window draws at 1x and is enlarged (xwayland_unscaled, or a popup of a window that is)
++        bool                              x11Unscaled();
++        // the window of this override-redirect window's app that draws unscaled, if any
++        PHLWINDOW                         x11UnscaledOwner();
++        // after x11PixelScale changed: the window keeps its X11 size (x11Size), so a floating one
++        // is resized to it, and every window is told its X11 size anew
++        void                              onX11PixelScaleChanged(Vector2D x11Size);
+         void                              sendWindowSize(bool force = false);
+         NContentType::eContentType        getContentType();
+         void                              setContentType(NContentType::eContentType contentType);
+diff --git a/src/layout/target/WindowTarget.cpp b/src/layout/target/WindowTarget.cpp
+index 461ce09..4b7d5ed 100644
+--- a/src/layout/target/WindowTarget.cpp
++++ b/src/layout/target/WindowTarget.cpp
+@@ -309,17 +309,21 @@ std::expected<SGeometryRequested, eGeometryFailure> CWindowTarget::desiredGeomet
+ 
+     CBox               DESIRED_GEOM = g_pXWaylandManager->getGeometryForWindow(m_window.lock());
+     const auto         PMONITOR     = m_window->m_monitor.lock();
+-
+-    requested.size = clampSizeForDesired(DESIRED_GEOM.size());
++    // X11 sizes and surfaces are in X11 pixels, the logical ones times the window's X11 scale
++    const float XWLSCALE = m_window->m_isX11 && PMONITOR ? m_window->x11PixelScale() : 1.F;
+ 
+     if (m_window->m_isX11) {
+         Vector2D xy    = {DESIRED_GEOM.x, DESIRED_GEOM.y};
+-        xy             = g_pXWaylandManager->xwaylandToWaylandCoords(xy);
++        xy             = m_window->xwaylandPositionToReal(xy);
+         requested.pos  = xy;
+         DESIRED_GEOM.x = xy.x;
+         DESIRED_GEOM.y = xy.y;
++        DESIRED_GEOM.w /= XWLSCALE;
++        DESIRED_GEOM.h /= XWLSCALE;
+     }
+ 
++    requested.size = clampSizeForDesired(DESIRED_GEOM.size());
++
+     const auto STOREDSIZE = m_window->m_ruleApplicator->persistentSize().valueOrDefault() ? Desktop::floatState()->get(m_window.lock()) : std::nullopt;
+ 
+     if (STOREDSIZE)
+@@ -330,33 +334,25 @@ std::expected<SGeometryRequested, eGeometryFailure> CWindowTarget::desiredGeomet
+         return std::unexpected(GEOMETRY_NO_DESIRED);
+     }
+ 
+-    static auto PXWLFORCESCALEZERO = CConfigValue<Config::INTEGER>("xwayland:force_zero_scaling");
+-    const auto  toLogical          = [&](SGeometryRequested& req) {
+-        if (m_window->m_isX11 && *PXWLFORCESCALEZERO && PMONITOR)
+-            req.size /= PMONITOR->m_scale;
+-    };
+-
+     if (DESIRED_GEOM.width <= 2 || DESIRED_GEOM.height <= 2) {
+         const auto SURFACE = m_window->wlSurface()->resource();
+ 
+         if (SURFACE->m_current.size.x > 5 && SURFACE->m_current.size.y > 5) {
+             // center on mon and call it a day
+             requested.pos.reset();
+-            requested.size = clampSizeForDesired(SURFACE->m_current.size);
+-            toLogical(requested);
++            requested.size = clampSizeForDesired(SURFACE->m_current.size / XWLSCALE);
+             return requested;
+         }
+ 
+         if (m_window->m_isX11 && m_window->isX11OverrideRedirect()) {
+             // check OR windows, they like their shit
+             const auto SIZE = clampSizeForDesired(m_window->m_xwaylandSurface->m_geometry.w > 0 && m_window->m_xwaylandSurface->m_geometry.h > 0 ?
+-                                                      m_window->m_xwaylandSurface->m_geometry.size() :
++                                                      m_window->m_xwaylandSurface->m_geometry.size() / XWLSCALE :
+                                                       Vector2D{600, 400});
+ 
+             if (m_window->m_xwaylandSurface->m_geometry.x != 0 && m_window->m_xwaylandSurface->m_geometry.y != 0) {
+                 requested.size = SIZE;
+-                requested.pos  = g_pXWaylandManager->xwaylandToWaylandCoords(m_window->m_xwaylandSurface->m_geometry.pos());
+-                toLogical(requested);
++                requested.pos  = m_window->xwaylandPositionToReal(m_window->m_xwaylandSurface->m_geometry.pos());
+                 return requested;
+             }
+         }
+@@ -391,7 +387,6 @@ std::expected<SGeometryRequested, eGeometryFailure> CWindowTarget::desiredGeomet
+     if (DESIRED_GEOM.w <= 2 || DESIRED_GEOM.h <= 2)
+         return std::unexpected(GEOMETRY_NO_DESIRED);
+ 
+-    toLogical(requested);
+     return requested;
+ }
+ 
+diff --git a/src/managers/XWaylandManager.cpp b/src/managers/XWaylandManager.cpp
+index b1a547c..55f92e2 100644
+--- a/src/managers/XWaylandManager.cpp
++++ b/src/managers/XWaylandManager.cpp
+@@ -92,6 +92,12 @@ CBox CHyprXWaylandManager::getGeometryForWindow(PHLWINDOW pWindow) {
+     Vector2D MINSIZE = pWindow->minSize().value_or(Vector2D{MIN_WINDOW_SIZE, MIN_WINDOW_SIZE});
+     Vector2D MAXSIZE = pWindow->maxSize().value_or(Math::VECTOR2D_MAX).clamp(MINSIZE + Vector2D{1, 1});
+ 
++    // the limits are logical, an X11 window's geometry is in X11 pixels
++    if (pWindow->m_isX11) {
++        MINSIZE = MINSIZE * pWindow->x11PixelScale();
++        MAXSIZE = MAXSIZE * pWindow->x11PixelScale();
++    }
++
+     Vector2D oldSize = box.size();
+     box.w            = std::clamp(box.w, MINSIZE.x, MAXSIZE.x);
+     box.h            = std::clamp(box.h, MINSIZE.y, MAXSIZE.y);
+@@ -179,13 +185,11 @@ Vector2D CHyprXWaylandManager::waylandToXWaylandCoords(const Vector2D& coord) {
+ }
+ 
+ Vector2D CHyprXWaylandManager::waylandToXWaylandCoords(const Vector2D& coord, PHLMONITOR preferredMonitor) {
+-    static auto PXWLFORCESCALEZERO = CConfigValue<Config::INTEGER>("xwayland:force_zero_scaling");
+-
+-    PHLMONITOR  pMonitor = preferredMonitor;
++    PHLMONITOR pMonitor = preferredMonitor;
+     if (!pMonitor) {
+         double bestDistance = __FLT_MAX__;
+         for (const auto& m : State::monitorState()->monitors()) {
+-            const auto SIZ = *PXWLFORCESCALEZERO ? m->m_transformedSize : m->m_size;
++            const auto SIZ = m->m_size;
+ 
+             double     distance = vecToRectDistanceSquared(coord, {m->m_position.x, m->m_position.y}, {m->m_position.x + SIZ.x - 1, m->m_position.y + SIZ.y - 1});
+ 
+@@ -201,9 +205,8 @@ Vector2D CHyprXWaylandManager::waylandToXWaylandCoords(const Vector2D& coord, PH
+ 
+     // get local coords
+     Vector2D result = coord - pMonitor->m_position;
+-    // if scaled, scale
+-    if (*PXWLFORCESCALEZERO)
+-        result *= pMonitor->m_scale;
++    // scale (the monitor's X11 scale: 1, its own, or the one for every monitor)
++    result *= pMonitor->m_xwaylandScale;
+     // add pos
+     result += pMonitor->m_xwaylandPosition;
+ 
+@@ -215,14 +218,12 @@ Vector2D CHyprXWaylandManager::xwaylandToWaylandCoords(const Vector2D& coord) {
+ }
+ 
+ Vector2D CHyprXWaylandManager::xwaylandToWaylandCoords(const Vector2D& coord, PHLMONITOR preferredMonitor) {
+-
+-    static auto PXWLFORCESCALEZERO = CConfigValue<Config::INTEGER>("xwayland:force_zero_scaling");
+-
+-    PHLMONITOR  pMonitor = preferredMonitor;
++    PHLMONITOR pMonitor = preferredMonitor;
+     if (!pMonitor) {
+         double bestDistance = __FLT_MAX__;
+         for (const auto& m : State::monitorState()->monitors()) {
+-            const auto SIZ = *PXWLFORCESCALEZERO ? m->m_transformedSize : m->m_size;
++            // the monitor's size in X11 space: its layout size at its X11 scale
++            const auto SIZ = m->m_size * m->m_xwaylandScale;
+ 
+             double     distance =
+                 vecToRectDistanceSquared(coord, {m->m_xwaylandPosition.x, m->m_xwaylandPosition.y}, {m->m_xwaylandPosition.x + SIZ.x - 1, m->m_xwaylandPosition.y + SIZ.y - 1});
+@@ -239,9 +240,8 @@ Vector2D CHyprXWaylandManager::xwaylandToWaylandCoords(const Vector2D& coord, PH
+ 
+     // get local coords
+     Vector2D result = coord - pMonitor->m_xwaylandPosition;
+-    // if scaled, unscale
+-    if (*PXWLFORCESCALEZERO)
+-        result /= pMonitor->m_scale;
++    // unscale
++    result /= pMonitor->m_xwaylandScale;
+     // add pos
+     result += pMonitor->m_position;
+ 
+diff --git a/src/pointer/PointerManager.cpp b/src/pointer/PointerManager.cpp
+index e3e81af..216361a 100644
+--- a/src/pointer/PointerManager.cpp
++++ b/src/pointer/PointerManager.cpp
+@@ -22,6 +22,8 @@
+ #include "../helpers/Drm.hpp"
+ #include "../event/EventBus.hpp"
+ #include "../state/MonitorState.hpp"
++#include "../desktop/view/Window.hpp"
++#include "../xwayland/XWayland.hpp"
+ #include <climits>
+ #include <cstring>
+ #include <gbm.h>
+@@ -33,6 +35,22 @@
+ using namespace Hyprutils::Utils;
+ using namespace Pointer;
+ 
++// An X11 cursor is drawn in X11 pixels, at the size the X11 scale tells apps to draw it: with
++// xwayland:scale it is shown, as the X11 window under it is, at its size divided by that window's
++// X11 scale. Without xwayland:scale it is shown at its size, as before.
++static float x11CursorScale(SP<Desktop::View::CWLSurface> surf) {
++    static auto PXWLSCALE = CConfigValue<Config::FLOAT>("xwayland:scale");
++    if (*PXWLSCALE == 0.F || !surf || !surf->resource())
++        return 1.F;
++
++    if (!g_pXWayland || !g_pXWayland->m_server || surf->resource()->client() != g_pXWayland->m_server->m_xwaylandClient)
++        return 1.F;
++
++    const auto FOCUS   = Desktop::View::CWLSurface::fromResource(g_pSeatManager->m_state.pointerFocus.lock());
++    const auto PWINDOW = FOCUS ? Desktop::View::CWindow::fromView(FOCUS->view()) : nullptr;
++    return PWINDOW && PWINDOW->m_isX11 ? PWINDOW->x11PixelScale() : 1.F;
++}
++
+ UP<CPointerManager>& Pointer::mgr() {
+     static UP<CPointerManager> p = makeUnique<CPointerManager>();
+     return p;
+@@ -156,10 +174,12 @@ void CPointerManager::setCursorBuffer(SP<Aquamarine::IBuffer> buf, const Vector2
+ void CPointerManager::setCursorSurface(SP<Desktop::View::CWLSurface> surf, const Vector2D& hotspot) {
+     damageIfSoftware();
+ 
++    const float X11SCALE = x11CursorScale(surf);
++
+     if (surf == m_currentCursorImage.surface) {
+-        if (hotspot != m_currentCursorImage.hotspot || (surf && surf->resource() ? surf->resource()->m_current.scale : 1.F) != m_currentCursorImage.scale) {
+-            m_currentCursorImage.hotspot = hotspot;
+-            m_currentCursorImage.scale   = surf && surf->resource() ? surf->resource()->m_current.scale : 1.F;
++        if (hotspot / X11SCALE != m_currentCursorImage.hotspot || (surf && surf->resource() ? surf->resource()->m_current.scale * X11SCALE : 1.F) != m_currentCursorImage.scale) {
++            m_currentCursorImage.hotspot = hotspot / X11SCALE;
++            m_currentCursorImage.scale   = surf && surf->resource() ? surf->resource()->m_current.scale * X11SCALE : 1.F;
+             updateCursorBackend();
+             damageIfSoftware();
+             m_events.cursorChanged.emit();
+@@ -172,7 +192,7 @@ void CPointerManager::setCursorSurface(SP<Desktop::View::CWLSurface> surf, const
+ 
+     if (surf) {
+         m_currentCursorImage.surface = surf;
+-        m_currentCursorImage.scale   = surf->resource()->m_current.scale;
++        m_currentCursorImage.scale   = surf->resource()->m_current.scale * X11SCALE;
+ 
+         surf->resource()->map();
+ 
+@@ -180,7 +200,8 @@ void CPointerManager::setCursorSurface(SP<Desktop::View::CWLSurface> surf, const
+         m_currentCursorImage.commitSurface  = surf->resource()->m_events.commit.listen([this] {
+             damageIfSoftware();
+             m_currentCursorImage.size  = m_currentCursorImage.surface->resource()->m_current.texture ? m_currentCursorImage.surface->resource()->m_current.bufferSize : Vector2D{};
+-            m_currentCursorImage.scale = m_currentCursorImage.surface ? m_currentCursorImage.surface->resource()->m_current.scale : 1.F;
++            m_currentCursorImage.scale =
++                m_currentCursorImage.surface ? m_currentCursorImage.surface->resource()->m_current.scale * x11CursorScale(m_currentCursorImage.surface.lock()) : 1.F;
+             recheckEnteredOutputs();
+             updateCursorBackend();
+             damageIfSoftware();
+@@ -193,7 +214,7 @@ void CPointerManager::setCursorSurface(SP<Desktop::View::CWLSurface> surf, const
+         }
+     }
+ 
+-    m_currentCursorImage.hotspot = hotspot;
++    m_currentCursorImage.hotspot = hotspot / X11SCALE;
+ 
+     recheckEnteredOutputs();
+     updateCursorBackend();
+diff --git a/src/protocols/PointerConstraints.cpp b/src/protocols/PointerConstraints.cpp
+index 0cfefed..c494832 100644
+--- a/src/protocols/PointerConstraints.cpp
++++ b/src/protocols/PointerConstraints.cpp
+@@ -27,8 +27,6 @@ CPointerConstraint::CPointerConstraint(SP<CZwpLockedPointerV1> resource_, SP<CWL
+ 
+     resource_->setSetRegion([this](CZwpLockedPointerV1* p, wl_resource* region) { onSetRegion(region); });
+     resource_->setSetCursorPositionHint([this](CZwpLockedPointerV1* p, wl_fixed_t x, wl_fixed_t y) {
+-        static auto PXWLFORCESCALEZERO = CConfigValue<Config::INTEGER>("xwayland:force_zero_scaling");
+-
+         if (!m_hlSurface)
+             return;
+ 
+@@ -38,7 +36,7 @@ CPointerConstraint::CPointerConstraint(SP<CZwpLockedPointerV1> resource_, SP<CWL
+         const auto PWINDOW = Desktop::View::CWindow::fromView(m_hlSurface->view());
+         if (PWINDOW) {
+             const auto ISXWL = PWINDOW->m_isX11;
+-            scale            = ISXWL && *PXWLFORCESCALEZERO ? PWINDOW->m_X11SurfaceScaledBy : 1.f;
++            scale            = ISXWL ? PWINDOW->m_X11SurfaceScaledBy : 1.f;
+         }
+ 
+         m_positionHint = {wl_fixed_to_double(x) / scale, wl_fixed_to_double(y) / scale};
+diff --git a/src/protocols/XDGOutput.cpp b/src/protocols/XDGOutput.cpp
+index f139af4..5e81959 100644
+--- a/src/protocols/XDGOutput.cpp
++++ b/src/protocols/XDGOutput.cpp
+@@ -111,18 +111,23 @@ CXDGOutput::CXDGOutput(SP<CZxdgOutputV1> resource_, PHLMONITOR monitor_) : m_mon
+ }
+ 
+ void CXDGOutput::sendDetails() {
+-    static auto PXWLFORCESCALEZERO = CConfigValue<Config::INTEGER>("xwayland:force_zero_scaling");
+-
+     if UNLIKELY (!m_monitor || !m_outputProto || m_outputProto->isDefunct())
+         return;
+ 
+-    const auto POS = m_isXWayland ? m_monitor->m_xwaylandPosition : m_monitor->m_position;
+-    m_resource->sendLogicalPosition(POS.x, POS.y);
++    Vector2D pos  = m_monitor->m_position;
++    Vector2D size = m_monitor->m_size;
++    if (m_isXWayland) {
++        pos = m_monitor->m_xwaylandPosition;
++        if (m_monitor->m_xwaylandScale == m_monitor->m_scale)
++            // force_zero_scaling: the monitor's pixels
++            size = m_monitor->m_transformedSize;
++        else
++            // the layout size at the monitor's X11 scale (1, or the one for every monitor)
++            size = (m_monitor->m_size * m_monitor->m_xwaylandScale).round();
++    }
+ 
+-    if (*PXWLFORCESCALEZERO && m_isXWayland)
+-        m_resource->sendLogicalSize(m_monitor->m_transformedSize.x, m_monitor->m_transformedSize.y);
+-    else
+-        m_resource->sendLogicalSize(m_monitor->m_size.x, m_monitor->m_size.y);
++    m_resource->sendLogicalPosition(pos.x, pos.y);
++    m_resource->sendLogicalSize(size.x, size.y);
+ 
+     if (m_resource->version() < OUTPUT_DONE_DEPRECATED_SINCE_VERSION)
+         m_resource->sendDone();
+diff --git a/src/render/Renderer.cpp b/src/render/Renderer.cpp
+index 249f084..28ad1b7 100644
+--- a/src/render/Renderer.cpp
++++ b/src/render/Renderer.cpp
+@@ -671,7 +671,14 @@ void IHyprRenderer::renderWindow(PHLWINDOW pWindow, PHLMONITOR pMonitor, const T
+         }
+ 
+         static auto PXWLUSENN = CConfigValue<Config::INTEGER>("xwayland:use_nearest_neighbor");
+-        if ((pWindow->m_isX11 && *PXWLUSENN) || pWindow->m_ruleApplicator->nearestNeighbor().valueOrDefault())
++        // an X11 window drawn at another scale than the monitor's is filtered linearly unless each
++        // of its pixels becomes a whole number of the monitor's: nearest neighbour would drop whole
++        // rows of a window drawn at a higher scale (the one X11 scale for every monitor), and
++        // double some rows and not others of one enlarged by 1.6 (an unscaled window)
++        const float XWLBUFFERSCALE = pWindow->m_isX11 ? pWindow->x11PixelScale() : 1.F;
++        const float XWLRATIO       = pMonitor->m_scale / XWLBUFFERSCALE;
++        const bool  XWLRESAMPLED   = pWindow->m_isX11 && (XWLRATIO < 0.999F || std::abs(XWLRATIO - std::round(XWLRATIO)) > 0.001F);
++        if ((pWindow->m_isX11 && *PXWLUSENN && !XWLRESAMPLED) || pWindow->m_ruleApplicator->nearestNeighbor().valueOrDefault())
+             renderdata.useNearestNeighbor = true;
+ 
+         if (!TRANSFORMEDWINDOW && pWindow->wlSurface()->small() && !pWindow->wlSurface()->m_fillIgnoreSmall && renderdata.blur) {
+diff --git a/src/state/MonitorLayoutController.cpp b/src/state/MonitorLayoutController.cpp
+index 49d7e00..0785c7b 100644
+--- a/src/state/MonitorLayoutController.cpp
++++ b/src/state/MonitorLayoutController.cpp
+@@ -54,6 +54,7 @@ void CMonitorLayoutController::checkOverlapsAndNotify() const {
+ 
+ void CMonitorLayoutController::arrange() const {
+     static auto                                   PXWLFORCESCALEZERO = CConfigValue<Config::INTEGER>("xwayland:force_zero_scaling");
++    static auto                                   PXWLSCALE          = CConfigValue<Config::FLOAT>("xwayland:scale");
+ 
+     std::vector<SP<Monitor::IMonitorArrangeable>> arrangeableMonitors;
+     arrangeableMonitors.reserve(State::monitorState()->monitors().size());
+@@ -64,7 +65,8 @@ void CMonitorLayoutController::arrange() const {
+     }
+ 
+     Log::logger->log(Log::DEBUG, "arrangeMonitors: {} to arrange", arrangeableMonitors.size());
+-    State::monitorPositionController()->arrange(arrangeableMonitors, *PXWLFORCESCALEZERO);
++    m_arrangedXWaylandScale = *PXWLSCALE;
++    State::monitorPositionController()->arrange(arrangeableMonitors, *PXWLFORCESCALEZERO, *PXWLSCALE);
+ 
+     PROTO::xdgOutput->updateAllOutputs();
+     Event::bus()->m_events.monitor.layoutChanged.emit();
+@@ -81,6 +83,11 @@ void CMonitorLayoutController::arrange() const {
+ #endif
+ }
+ 
++bool CMonitorLayoutController::xwaylandScaleChanged() const {
++    static auto PXWLSCALE = CConfigValue<Config::FLOAT>("xwayland:scale");
++    return *PXWLSCALE != m_arrangedXWaylandScale;
++}
++
+ bool CMonitorLayoutController::isPointOnAnyMonitor(const Vector2D& point) {
+     return std::ranges::any_of(State::monitorState()->monitors(), [&](const PHLMONITOR& m) {
+         return VECINRECT(point, m->m_position.x, m->m_position.y, m->m_size.x + m->m_position.x, m->m_size.y + m->m_position.y);
+@@ -100,7 +107,6 @@ bool CMonitorLayoutController::isPointOnReservedArea(const Vector2D& point, cons
+ }
+ 
+ std::optional<CBox> CMonitorLayoutController::calculateUnifiedX11WorkArea() const {
+-    static auto PXWLFORCESCALEZERO = CConfigValue<Config::INTEGER>("xwayland:force_zero_scaling");
+     // We more than likely won't be able to calculate one
+     // and even if we could this is minor
+     if (State::monitorState()->monitors().size() > 1 || State::monitorState()->monitors().empty())
+@@ -110,8 +116,7 @@ std::optional<CBox> CMonitorLayoutController::calculateUnifiedX11WorkArea() cons
+ 
+     // we ignore monitor->m_position on purpose
+     CBox box = M->logicalBoxMinusReserved().translate(-M->m_position);
+-    if ((*PXWLFORCESCALEZERO))
+-        box.scale(M->m_scale);
++    box.scale(M->m_xwaylandScale);
+ 
+     return box.translate(M->m_xwaylandPosition);
+ }
+diff --git a/src/state/MonitorLayoutController.hpp b/src/state/MonitorLayoutController.hpp
+index fa819bb..c1fff7e 100644
+--- a/src/state/MonitorLayoutController.hpp
++++ b/src/state/MonitorLayoutController.hpp
+@@ -17,8 +17,13 @@ namespace State {
+ 
+         bool                isVRRActiveOnAnyMonitor() const;
+ 
++        // xwayland:scale is not the one the monitors were last arranged with: a config reload
++        // that changes only it has no monitor rule to apply, and must arrange them again
++        bool                xwaylandScaleChanged() const;
++
+       private:
+-        bool m_scheduled = false;
++        bool          m_scheduled             = false;
++        mutable float m_arrangedXWaylandScale = 0.F;
+     };
+ 
+     UP<CMonitorLayoutController>& monitorLayoutController();
+diff --git a/src/state/MonitorPositionController.cpp b/src/state/MonitorPositionController.cpp
+index 215a7b5..5ec9987 100644
+--- a/src/state/MonitorPositionController.cpp
++++ b/src/state/MonitorPositionController.cpp
+@@ -5,6 +5,7 @@
+ #include "../macros.hpp"
+ 
+ #include <algorithm>
++#include <cmath>
+ 
+ using namespace State;
+ 
+@@ -13,7 +14,7 @@ UP<CMonitorPositionController>& State::monitorPositionController() {
+     return p;
+ }
+ 
+-void CMonitorPositionController::arrange(std::span<const SP<Monitor::IMonitorArrangeable>> monitors, bool xwaylandForceZeroScaling) const {
++void CMonitorPositionController::arrange(std::span<const SP<Monitor::IMonitorArrangeable>> monitors, bool xwaylandForceZeroScaling, float xwaylandScale) const {
+     std::vector<SP<Monitor::IMonitorArrangeable>> toArrange(monitors.begin(), monitors.end());
+     std::vector<SP<Monitor::IMonitorArrangeable>> arranged;
+     arranged.reserve(toArrange.size());
+@@ -100,10 +101,30 @@ void CMonitorPositionController::arrange(std::span<const SP<Monitor::IMonitorArr
+         arranged.emplace_back(m);
+     }
+ 
++    // One scale for every X11 client: the one asked for, or the highest monitor's, rounded
++    // up (-1, as mutter's xwayland-native-scaling has it) or as it is (-2). X11 has a single
++    // coordinate space and a single DPI, so clients render at it everywhere and each window is
++    // shown from it at its logical size on its own monitor.
++    float globalScale = xwaylandScale;
++    if (globalScale < 0.F) {
++        float highest = 1.F;
++        for (auto const& m : monitors)
++            highest = std::max(highest, m->scale());
++        globalScale = globalScale < -1.5F ? highest : std::ceil(highest - 0.001F);
++    }
++    if (globalScale > 0.F)
++        globalScale = std::max(1.F, globalScale);
++
+     maxXOffsetRight = 0;
+     for (auto const& m : monitors) {
+-        Log::logger->log(Log::DEBUG, "arrangeMonitors: {} xwayland [{}, {}]", m->name(), maxXOffsetRight, 0);
++        Log::logger->log(Log::DEBUG, "arrangeMonitors: {} xwayland [{}, {}] scale {}", m->name(), maxXOffsetRight, 0,
++                         globalScale > 0.F ? globalScale : (xwaylandForceZeroScaling ? m->scale() : 1.F));
+         m->setXWaylandPosition({maxXOffsetRight, 0});
++        if (globalScale > 0.F) {
++            maxXOffsetRight += std::round(m->size().x * globalScale);
++            m->setXWaylandScale(globalScale);
++            continue;
++        }
+         maxXOffsetRight += xwaylandForceZeroScaling ? m->transformedSize().x : m->size().x;
+         m->setXWaylandScale(xwaylandForceZeroScaling ? m->scale() : 1.F);
+     }
+diff --git a/src/state/MonitorPositionController.hpp b/src/state/MonitorPositionController.hpp
+index eddd7d6..3836936 100644
+--- a/src/state/MonitorPositionController.hpp
++++ b/src/state/MonitorPositionController.hpp
+@@ -9,7 +9,9 @@
+ namespace State {
+     class CMonitorPositionController {
+       public:
+-        void arrange(std::span<const SP<Monitor::IMonitorArrangeable>> monitors, bool xwaylandForceZeroScaling) const;
++        // xwaylandScale: the one scale X11 clients render at on every monitor (xwayland:scale;
++        // 0 for none, -1 the highest monitor scale rounded up, -2 the highest as it is)
++        void arrange(std::span<const SP<Monitor::IMonitorArrangeable>> monitors, bool xwaylandForceZeroScaling, float xwaylandScale = 0.F) const;
+     };
+ 
+     UP<CMonitorPositionController>& monitorPositionController();
+diff --git a/tests/state/MonitorPositionController.cpp b/tests/state/MonitorPositionController.cpp
+index bb69114..4a3999c 100644
+--- a/tests/state/MonitorPositionController.cpp
++++ b/tests/state/MonitorPositionController.cpp
+@@ -131,6 +131,16 @@ static void arrange(const std::vector<SP<CPositionTestMonitor>>& monitors, bool
+     State::CMonitorPositionController{}.arrange(arrangeableMonitors, xwaylandForceZeroScaling);
+ }
+ 
++static void arrangeWithXWaylandScale(const std::vector<SP<CPositionTestMonitor>>& monitors, float xwaylandScale) {
++    std::vector<SP<Monitor::IMonitorArrangeable>> arrangeableMonitors;
++    arrangeableMonitors.reserve(monitors.size());
++
++    for (const auto& monitor : monitors)
++        arrangeableMonitors.push_back(arrangeable(monitor));
++
++    State::CMonitorPositionController{}.arrange(arrangeableMonitors, false, xwaylandScale);
++}
++
+ TEST(MonitorPositionController, explicitPositionsAreAppliedFirst) {
+     const auto left  = testMonitor(0, "left", {100, 100});
+     const auto right = testMonitor(1, "right", {100, 100});
+@@ -252,3 +262,56 @@ TEST(MonitorPositionController, xwaylandPositionsUseTransformedSizeWhenForceZero
+     EXPECT_FLOAT_EQ(first->m_xwaylandScale, 2.F);
+     EXPECT_FLOAT_EQ(second->m_xwaylandScale, 1.F);
+ }
++
++TEST(MonitorPositionController, xwaylandScaleIsTheHighestMonitorScaleRoundedUp) {
++    const auto first  = testMonitor(0, "first", {100, 100});
++    const auto second = testMonitor(1, "second", {50, 50});
++
++    first->m_explicitPosition  = Vector2D{0, 0};
++    second->m_explicitPosition = Vector2D{100, 0};
++    first->m_transformedSize   = Vector2D{160, 160};
++    first->m_scale             = 1.6F;
++
++    arrangeWithXWaylandScale({first, second}, -1.F);
++
++    EXPECT_EQ(first->m_xwaylandPosition, Vector2D(0, 0));
++    EXPECT_EQ(second->m_xwaylandPosition, Vector2D(200, 0));
++    EXPECT_FLOAT_EQ(first->m_xwaylandScale, 2.F);
++    EXPECT_FLOAT_EQ(second->m_xwaylandScale, 2.F);
++}
++
++TEST(MonitorPositionController, xwaylandScaleCanBeTheHighestMonitorScaleAsItIs) {
++    const auto first  = testMonitor(0, "first", {100, 100});
++    const auto second = testMonitor(1, "second", {50, 50});
++
++    first->m_explicitPosition  = Vector2D{0, 0};
++    second->m_explicitPosition = Vector2D{100, 0};
++    first->m_transformedSize   = Vector2D{160, 160};
++    first->m_scale             = 1.6F;
++
++    arrangeWithXWaylandScale({first, second}, -2.F);
++
++    EXPECT_EQ(second->m_xwaylandPosition, Vector2D(160, 0));
++    EXPECT_FLOAT_EQ(first->m_xwaylandScale, 1.6F);
++    EXPECT_FLOAT_EQ(second->m_xwaylandScale, 1.6F);
++}
++
++
++
++TEST(MonitorPositionController, noXWaylandScaleLeavesForceZeroScaling) {
++    const auto first  = testMonitor(0, "first", {100, 100});
++    const auto second = testMonitor(1, "second", {50, 50});
++
++    first->m_explicitPosition  = Vector2D{0, 0};
++    second->m_explicitPosition = Vector2D{100, 0};
++    first->m_transformedSize   = Vector2D{200, 100};
++    first->m_scale             = 2.F;
++
++    std::vector<SP<Monitor::IMonitorArrangeable>> arrangeableMonitors = {arrangeable(first), arrangeable(second)};
++
++    State::CMonitorPositionController{}.arrange(arrangeableMonitors, true, 0.F);
++
++    EXPECT_EQ(second->m_xwaylandPosition, Vector2D(200, 0));
++    EXPECT_FLOAT_EQ(first->m_xwaylandScale, 2.F);
++    EXPECT_FLOAT_EQ(second->m_xwaylandScale, 1.F);
++}
