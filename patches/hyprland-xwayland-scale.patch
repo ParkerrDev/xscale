@@ -246,10 +246,20 @@ index cf38816..cff9217 100644
              parsePropTrivial(PWINDOW->m_ruleApplicator->noAnim(), VAL);
          else if (PROP == "no_blur")
 diff --git a/src/config/shared/monitor/MonitorRuleManager.cpp b/src/config/shared/monitor/MonitorRuleManager.cpp
-index 3805739..1e35ab5 100644
+index 3805739..1bddae7 100644
 --- a/src/config/shared/monitor/MonitorRuleManager.cpp
 +++ b/src/config/shared/monitor/MonitorRuleManager.cpp
-@@ -194,6 +194,12 @@ void CMonitorRuleManager::ensureMonitorStatus() {
+@@ -176,7 +176,8 @@ void CMonitorRuleManager::ensureMonitorStatus() {
+ 
+     m_reloadScheduled = false;
+ 
+-    if (monsForRefresh.empty())
++    // the X11 scale is laid out with the monitors, so a change to xwayland:scale alone lays them out again
++    if (monsForRefresh.empty() && !State::monitorLayoutController()->xwaylandScaleChanged())
+         return;
+ 
+     for (const auto& m : monsForRefresh) {
+@@ -194,6 +195,12 @@ void CMonitorRuleManager::ensureMonitorStatus() {
      State::monitorLayoutController()->arrange();
      State::monitorLayoutController()->checkOverlapsAndNotify();
  
@@ -1019,7 +1029,7 @@ index 249f084..dbd4050 100644
  
          if (!TRANSFORMEDWINDOW && pWindow->wlSurface()->small() && !pWindow->wlSurface()->m_fillIgnoreSmall && renderdata.blur) {
 diff --git a/src/state/MonitorLayoutController.cpp b/src/state/MonitorLayoutController.cpp
-index 49d7e00..a797326 100644
+index 49d7e00..cff0111 100644
 --- a/src/state/MonitorLayoutController.cpp
 +++ b/src/state/MonitorLayoutController.cpp
 @@ -12,6 +12,7 @@
@@ -1038,12 +1048,13 @@ index 49d7e00..a797326 100644
  
      std::vector<SP<Monitor::IMonitorArrangeable>> arrangeableMonitors;
      arrangeableMonitors.reserve(State::monitorState()->monitors().size());
-@@ -64,8 +66,12 @@ void CMonitorLayoutController::arrange() const {
+@@ -64,8 +66,13 @@ void CMonitorLayoutController::arrange() const {
      }
  
      Log::logger->log(Log::DEBUG, "arrangeMonitors: {} to arrange", arrangeableMonitors.size());
 -    State::monitorPositionController()->arrange(arrangeableMonitors, *PXWLFORCESCALEZERO);
 +    const bool  XWLSCALESITSELF = PROTO::xwaylandShell && PROTO::xwaylandShell->canScale();
++    m_arrangedXWaylandScale     = *PXWLSCALE;
 +    const float XWLSCALE        = State::monitorPositionController()->arrange(arrangeableMonitors, *PXWLFORCESCALEZERO, *PXWLSCALE, XWLSCALESITSELF);
  
 +    // before the outputs, whose geometry for Xwayland depends on whether it scales itself
@@ -1052,7 +1063,19 @@ index 49d7e00..a797326 100644
      PROTO::xdgOutput->updateAllOutputs();
      Event::bus()->m_events.monitor.layoutChanged.emit();
  
-@@ -100,7 +106,6 @@ bool CMonitorLayoutController::isPointOnReservedArea(const Vector2D& point, cons
+@@ -81,6 +88,11 @@ void CMonitorLayoutController::arrange() const {
+ #endif
+ }
+ 
++bool CMonitorLayoutController::xwaylandScaleChanged() const {
++    static auto PXWLSCALE = CConfigValue<Config::FLOAT>("xwayland:scale");
++    return *PXWLSCALE != m_arrangedXWaylandScale;
++}
++
+ bool CMonitorLayoutController::isPointOnAnyMonitor(const Vector2D& point) {
+     return std::ranges::any_of(State::monitorState()->monitors(), [&](const PHLMONITOR& m) {
+         return VECINRECT(point, m->m_position.x, m->m_position.y, m->m_size.x + m->m_position.x, m->m_size.y + m->m_position.y);
+@@ -100,7 +112,6 @@ bool CMonitorLayoutController::isPointOnReservedArea(const Vector2D& point, cons
  }
  
  std::optional<CBox> CMonitorLayoutController::calculateUnifiedX11WorkArea() const {
@@ -1060,7 +1083,7 @@ index 49d7e00..a797326 100644
      // We more than likely won't be able to calculate one
      // and even if we could this is minor
      if (State::monitorState()->monitors().size() > 1 || State::monitorState()->monitors().empty())
-@@ -110,8 +115,7 @@ std::optional<CBox> CMonitorLayoutController::calculateUnifiedX11WorkArea() cons
+@@ -110,8 +121,7 @@ std::optional<CBox> CMonitorLayoutController::calculateUnifiedX11WorkArea() cons
  
      // we ignore monitor->m_position on purpose
      CBox box = M->logicalBoxMinusReserved().translate(-M->m_position);
@@ -1070,6 +1093,25 @@ index 49d7e00..a797326 100644
  
      return box.translate(M->m_xwaylandPosition);
  }
+diff --git a/src/state/MonitorLayoutController.hpp b/src/state/MonitorLayoutController.hpp
+index fa819bb..c1fff7e 100644
+--- a/src/state/MonitorLayoutController.hpp
++++ b/src/state/MonitorLayoutController.hpp
+@@ -17,8 +17,13 @@ namespace State {
+ 
+         bool                isVRRActiveOnAnyMonitor() const;
+ 
++        // xwayland:scale is not the one the monitors were last arranged with: a config reload
++        // that changes only it has no monitor rule to apply, and must arrange them again
++        bool                xwaylandScaleChanged() const;
++
+       private:
+-        bool m_scheduled = false;
++        bool          m_scheduled             = false;
++        mutable float m_arrangedXWaylandScale = 0.F;
+     };
+ 
+     UP<CMonitorLayoutController>& monitorLayoutController();
 diff --git a/src/state/MonitorPositionController.cpp b/src/state/MonitorPositionController.cpp
 index 215a7b5..ec878b6 100644
 --- a/src/state/MonitorPositionController.cpp
