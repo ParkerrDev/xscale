@@ -35,7 +35,7 @@ curl -fsSL https://raw.githubusercontent.com/ParkerrDev/xscale/master/install.sh
 
 1. **The protocol.** `xwayland_shell_v1` version 2 gains one event, `scale`, in which the compositor tells Xwayland the scale its X11 clients render at (times 120, as `wp_fractional_scale_v1` has it). [protocol/xwayland-shell-v1.xml](protocol/xwayland-shell-v1.xml)
 2. **Xwayland** ([patches/xwayland-rootless-scale.patch](patches/xwayland-rootless-scale.patch)), rootless, with that scale: lays the X11 screen out at the outputs' logical geometry times the scale, shows every surface at its buffer size divided by it (`wp_viewport`, so any window size and any fractional scale work), maps pointer, touch and tablet coordinates back, shows X11 cursors at their size divided by it, and passes XTest input to libei at logical coordinates. Without the event, or with a compositor that only knows version 1, nothing changes.
-3. **Hyprland** ([patches/hyprland-xwayland-scale.patch](patches/hyprland-xwayland-scale.patch)): the option `xwayland:scale`, the one scale every X11 client renders at. With an Xwayland that binds version 2 it sends the scale and treats X11 surfaces like any other; with a stock Xwayland it scales the X11 windows itself. It also fixes X11 size hints (minimum and maximum sizes), which were taken as logical sizes while they are X11 pixels, and adds the window rule `xwayland_unscaled` for apps that draw at 1x whatever they are told.
+3. **Hyprland** ([patches/hyprland-xwayland-scale.patch](patches/hyprland-xwayland-scale.patch)): the option `xwayland:scale`, the one scale every X11 client renders at. With an Xwayland that binds version 2 it sends the scale and treats X11 surfaces like any other; with a stock Xwayland it scales the X11 windows itself. Either way an X11 cursor is never shown smaller than Hyprland's own: GTK and Qt draw theirs at `XCURSOR_SIZE` times the scale, while Chromium and Electron apps, Steam and Wine draw `XCURSOR_SIZE` as it is, and both come out the size of Hyprland's cursor. It also fixes X11 size hints (minimum and maximum sizes), which were taken as logical sizes while they are X11 pixels, and adds the window rule `xwayland_unscaled` for apps that draw at 1x whatever they are told.
 
 ### The toolkits
 
@@ -145,7 +145,7 @@ Measured in a nested Hyprland with a monitor at 1.6 and a second at 1, with `too
 
 - X11 at `-2` (1.6) on the 1.6 monitor: a one-pixel checkerboard comes out exactly, 0 grey pixels out of 1.39 million.
 - X11 at `-1` (2), the default: an X11 window on the monitor at 1 is filtered down cleanly, with no rows dropped, and GTK 3 (zenity, Bambu Studio) and Qt 6 windows are the same size as the same apps on Wayland, on both monitors.
-- The pointer lands on the X11 pixel it is over, on either monitor, and the X11 cursor is the size of Hyprland's own.
+- The pointer lands on the X11 pixel it is over, on either monitor, and the X11 cursor is the size of Hyprland's own, both for an app that draws it at the scale (GTK, Qt) and for one that draws it at `XCURSOR_SIZE` as it is (Steam, Chromium, Wine), with either Xwayland.
 - A 300x200 X11 window drawing at 1x, ruled `xwayland_unscaled`, is 300x200 logical pixels instead of 150x100; a popup it opens 20,30 X11 pixels inside it sits 20,30 logical pixels inside it. Switching the rule keeps the window's X11 size, so the app never sees a resize.
 - Hyprland's 275 unit tests pass, 5 of them new for this. A stock Hyprland with xscale's Xwayland, and xscale's Hyprland with a stock Xwayland, both behave as before.
 
