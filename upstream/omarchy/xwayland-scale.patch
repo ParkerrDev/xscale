@@ -14,8 +14,10 @@ logical size itself, so a window is pixel for pixel on a monitor of that
 scale, downscaled with linear filtering on a lower one, and never upscaled.
 It needs nothing of Xwayland and changes no protocol. An X11 cursor is
 shown the same way, at its size divided by the X11 scale of the window under
-it, so an app that draws its cursor at the X11 scale gets one the size of
-Hyprland's own.
+it, but not below Hyprland's cursor size. An app that draws its cursor at
+the X11 scale (GTK, Qt) and one that takes XCURSOR_SIZE as it is (Chromium
+and Electron apps, Steam, Wine) both get one the size of Hyprland's own, and
+a cursor drawn smaller than that is shown at its own size, as today.
 
 The scale is laid out with the monitors, so a config reload that changes
 only xwayland:scale lays them out again, as a monitor change does.
@@ -586,25 +588,29 @@ index b1a547c..55f92e2 100644
      result += pMonitor->m_position;
  
 diff --git a/src/pointer/PointerManager.cpp b/src/pointer/PointerManager.cpp
-index e3e81af..216361a 100644
+index e3e81af..0639adf 100644
 --- a/src/pointer/PointerManager.cpp
 +++ b/src/pointer/PointerManager.cpp
-@@ -22,6 +22,8 @@
+@@ -22,6 +22,9 @@
  #include "../helpers/Drm.hpp"
  #include "../event/EventBus.hpp"
  #include "../state/MonitorState.hpp"
 +#include "../desktop/view/Window.hpp"
 +#include "../xwayland/XWayland.hpp"
++#include "cursor/CursorManager.hpp"
  #include <climits>
  #include <cstring>
  #include <gbm.h>
-@@ -33,6 +35,22 @@
+@@ -33,6 +36,34 @@
  using namespace Hyprutils::Utils;
  using namespace Pointer;
  
-+// An X11 cursor is drawn in X11 pixels, at the size the X11 scale tells apps to draw it: with
-+// xwayland:scale it is shown, as the X11 window under it is, at its size divided by that window's
-+// X11 scale. Without xwayland:scale it is shown at its size, as before.
++// An X11 cursor is drawn in X11 pixels. With xwayland:scale it is shown, as the X11 window under it
++// is, at its size divided by that window's X11 scale, but not below the cursor size: an app told the
++// scale draws its cursor at the cursor size times the scale, many take XCURSOR_SIZE as it is
++// (Chromium and Electron apps, Steam, Wine) and would get theirs shrunk by the scale. A cursor drawn
++// smaller than the cursor size is shown at its size. Without xwayland:scale it is shown at its size,
++// as before.
 +static float x11CursorScale(SP<Desktop::View::CWLSurface> surf) {
 +    static auto PXWLSCALE = CConfigValue<Config::FLOAT>("xwayland:scale");
 +    if (*PXWLSCALE == 0.F || !surf || !surf->resource())
@@ -615,13 +621,22 @@ index e3e81af..216361a 100644
 +
 +    const auto FOCUS   = Desktop::View::CWLSurface::fromResource(g_pSeatManager->m_state.pointerFocus.lock());
 +    const auto PWINDOW = FOCUS ? Desktop::View::CWindow::fromView(FOCUS->view()) : nullptr;
-+    return PWINDOW && PWINDOW->m_isX11 ? PWINDOW->x11PixelScale() : 1.F;
++    if (!PWINDOW || !PWINDOW->m_isX11)
++        return 1.F;
++
++    const float X11SCALE = PWINDOW->x11PixelScale();
++    const auto  BUFFER   = surf->resource()->m_current.bufferSize;
++    const float SIZE     = Cursor::mgr()->getSize();
++    if (X11SCALE <= 1.F || BUFFER.x <= 0 || BUFFER.y <= 0 || SIZE <= 0.F)
++        return X11SCALE;
++
++    return std::clamp(sc<float>(std::max(BUFFER.x, BUFFER.y)) / SIZE, 1.F, X11SCALE);
 +}
 +
  UP<CPointerManager>& Pointer::mgr() {
      static UP<CPointerManager> p = makeUnique<CPointerManager>();
      return p;
-@@ -156,10 +174,12 @@ void CPointerManager::setCursorBuffer(SP<Aquamarine::IBuffer> buf, const Vector2
+@@ -156,10 +187,13 @@ void CPointerManager::setCursorBuffer(SP<Aquamarine::IBuffer> buf, const Vector2
  void CPointerManager::setCursorSurface(SP<Desktop::View::CWLSurface> surf, const Vector2D& hotspot) {
      damageIfSoftware();
  
@@ -631,13 +646,14 @@ index e3e81af..216361a 100644
 -        if (hotspot != m_currentCursorImage.hotspot || (surf && surf->resource() ? surf->resource()->m_current.scale : 1.F) != m_currentCursorImage.scale) {
 -            m_currentCursorImage.hotspot = hotspot;
 -            m_currentCursorImage.scale   = surf && surf->resource() ? surf->resource()->m_current.scale : 1.F;
++        m_cursorSurfaceHotspot = hotspot;
 +        if (hotspot / X11SCALE != m_currentCursorImage.hotspot || (surf && surf->resource() ? surf->resource()->m_current.scale * X11SCALE : 1.F) != m_currentCursorImage.scale) {
 +            m_currentCursorImage.hotspot = hotspot / X11SCALE;
 +            m_currentCursorImage.scale   = surf && surf->resource() ? surf->resource()->m_current.scale * X11SCALE : 1.F;
              updateCursorBackend();
              damageIfSoftware();
              m_events.cursorChanged.emit();
-@@ -172,7 +192,7 @@ void CPointerManager::setCursorSurface(SP<Desktop::View::CWLSurface> surf, const
+@@ -172,7 +206,7 @@ void CPointerManager::setCursorSurface(SP<Desktop::View::CWLSurface> surf, const
  
      if (surf) {
          m_currentCursorImage.surface = surf;
@@ -646,25 +662,78 @@ index e3e81af..216361a 100644
  
          surf->resource()->map();
  
-@@ -180,7 +200,8 @@ void CPointerManager::setCursorSurface(SP<Desktop::View::CWLSurface> surf, const
+@@ -180,7 +214,10 @@ void CPointerManager::setCursorSurface(SP<Desktop::View::CWLSurface> surf, const
          m_currentCursorImage.commitSurface  = surf->resource()->m_events.commit.listen([this] {
              damageIfSoftware();
              m_currentCursorImage.size  = m_currentCursorImage.surface->resource()->m_current.texture ? m_currentCursorImage.surface->resource()->m_current.bufferSize : Vector2D{};
 -            m_currentCursorImage.scale = m_currentCursorImage.surface ? m_currentCursorImage.surface->resource()->m_current.scale : 1.F;
-+            m_currentCursorImage.scale =
-+                m_currentCursorImage.surface ? m_currentCursorImage.surface->resource()->m_current.scale * x11CursorScale(m_currentCursorImage.surface.lock()) : 1.F;
++            // an X11 cursor's scale follows its buffer's size, and Xwayland sets the hotspot before it commits the buffer
++            const float X11SCALE         = x11CursorScale(m_currentCursorImage.surface.lock());
++            m_currentCursorImage.scale   = m_currentCursorImage.surface ? m_currentCursorImage.surface->resource()->m_current.scale * X11SCALE : 1.F;
++            m_currentCursorImage.hotspot = m_cursorSurfaceHotspot / X11SCALE;
              recheckEnteredOutputs();
              updateCursorBackend();
              damageIfSoftware();
-@@ -193,7 +214,7 @@ void CPointerManager::setCursorSurface(SP<Desktop::View::CWLSurface> surf, const
+@@ -193,7 +230,8 @@ void CPointerManager::setCursorSurface(SP<Desktop::View::CWLSurface> surf, const
          }
      }
  
 -    m_currentCursorImage.hotspot = hotspot;
++    m_cursorSurfaceHotspot       = hotspot;
 +    m_currentCursorImage.hotspot = hotspot / X11SCALE;
  
      recheckEnteredOutputs();
      updateCursorBackend();
+@@ -259,6 +297,7 @@ void CPointerManager::resetCursorImage(bool apply) {
+ 
+     m_currentCursorImage.scale   = 1.F;
+     m_currentCursorImage.hotspot = {0, 0};
++    m_cursorSurfaceHotspot       = {0, 0};
+ 
+     for (auto const& s : m_monitorStates) {
+         if (s->monitor.expired() || s->monitor->isMirror() || !s->monitor->m_enabled)
+diff --git a/src/pointer/PointerManager.hpp b/src/pointer/PointerManager.hpp
+index 867473f..b8ccdab 100644
+--- a/src/pointer/PointerManager.hpp
++++ b/src/pointer/PointerManager.hpp
+@@ -196,6 +196,10 @@ namespace Pointer {
+             CHyprSignalListener monitorLayoutChanged;
+             CHyprSignalListener monitorPreRender;
+         } m_hooks;
++
++        // the hotspot as the cursor surface's client set it: an X11 cursor's is in X11 pixels and scaled with its
++        // buffer. Last, so plugins built against Hyprland's headers before it keep their layout.
++        Vector2D m_cursorSurfaceHotspot;
+     };
+ 
+     UP<CPointerManager>& mgr();
+diff --git a/src/pointer/cursor/CursorManager.cpp b/src/pointer/cursor/CursorManager.cpp
+index ef95100..f25a0b2 100644
+--- a/src/pointer/cursor/CursorManager.cpp
++++ b/src/pointer/cursor/CursorManager.cpp
+@@ -352,6 +352,10 @@ void CCursorManager::syncGsettings() {
+     m_xcursor->syncGsettings();
+ }
+ 
++float CCursorManager::getSize() const {
++    return m_size;
++}
++
+ float CCursorManager::getScaledSize() const {
+     return m_size * m_cursorScale;
+ }
+diff --git a/src/pointer/cursor/CursorManager.hpp b/src/pointer/cursor/CursorManager.hpp
+index 7ff98a4..0f8d72e 100644
+--- a/src/pointer/cursor/CursorManager.hpp
++++ b/src/pointer/cursor/CursorManager.hpp
+@@ -56,6 +56,7 @@ namespace Pointer::Cursor {
+ 
+         void                    tickAnimatedCursor();
+ 
++        float                   getSize() const;
+         float                   getScaledSize() const;
+ 
+       private:
 diff --git a/src/protocols/PointerConstraints.cpp b/src/protocols/PointerConstraints.cpp
 index 0cfefed..c494832 100644
 --- a/src/protocols/PointerConstraints.cpp

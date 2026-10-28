@@ -17,7 +17,11 @@ change as proposed there in
 `patches/hyprland-xwayland-scale.patch` without the `xwayland_shell_v1`
 version 2 part. Hyprland lays X11 out at `xwayland:scale` and scales X11
 windows and cursors down to their logical size itself, so it works with
-Arch's stock Xwayland and changes no protocol. With the version 2 part on top,
+Arch's stock Xwayland and changes no protocol. An X11 cursor is shown at its
+size divided by the X11 scale, but never below Hyprland's cursor size: GTK and
+Qt draw theirs at `XCURSOR_SIZE` times the scale, while Chromium and Electron
+apps, Steam and Wine draw `XCURSOR_SIZE` as it is, and both come out the size
+of Hyprland's own cursor. With the version 2 part on top,
 an Xwayland that takes the scale shows its windows at their logical size
 itself, and Hyprland leaves them as they come.
 
