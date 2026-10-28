@@ -21,6 +21,17 @@ Arch's stock Xwayland and changes no protocol. With the version 2 part on top,
 an Xwayland that takes the scale shows its windows at their logical size
 itself, and Hyprland leaves them as they come.
 
+[omarchy/xwayland-scale-0.57.0.patch](omarchy/xwayland-scale-0.57.0.patch)
+is the same change for Hyprland 0.57.0, for when Omarchy moves to it. 0.57.0
+gave X11 windows a backend class of their own (`CX11Backend`), so the scale
+lives there. It applies with `--fuzz=0` to the 0.57.0 tag, alone or after
+Omarchy's `monitor-rule-vrr.patch`; Omarchy's other three patches do not apply
+to 0.57.0 as they are, so they come first when the recipe moves. Its 834 unit
+tests pass, and in a nested Hyprland with Arch's stock Xwayland it does
+exactly what the 0.56.2 patch does: X11 sizes with Omarchy's `monitors.lua`,
+linear filtering only with `xwayland:scale` set, popups of unscaled windows,
+cursor sizes, and live changes of the scale, the rule and the monitors.
+
 The protocol goes first: Xwayland and Hyprland both implement its version 2.
 The Xwayland MR can be opened at the same time and linked from the protocol
 MR, since wayland-protocols wants implementations before it merges. The
