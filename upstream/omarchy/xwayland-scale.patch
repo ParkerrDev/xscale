@@ -245,7 +245,7 @@ index 7636325..e7c6113 100644
          WINDOW_RULE_EFFECT_LAST_STATIC,
      };
 diff --git a/src/desktop/view/Window.cpp b/src/desktop/view/Window.cpp
-index 8836f73..0d2a37b 100644
+index 8836f73..4c4cd36 100644
 --- a/src/desktop/view/Window.cpp
 +++ b/src/desktop/view/Window.cpp
 @@ -1686,14 +1686,11 @@ Vector2D CWindow::realToReportSize() {
@@ -266,7 +266,7 @@ index 8836f73..0d2a37b 100644
  
      return REPORTSIZE;
  }
-@@ -1706,27 +1703,77 @@ Vector2D CWindow::realToReportPosition() {
+@@ -1706,27 +1703,78 @@ Vector2D CWindow::realToReportPosition() {
  }
  
  Vector2D CWindow::xwaylandSizeToReal(Vector2D size) {
@@ -283,7 +283,8 @@ index 8836f73..0d2a37b 100644
  
  Vector2D CWindow::xwaylandPositionToReal(Vector2D pos) {
 +    // a menu or tooltip of an app that draws unscaled lies in its window's pixels, enlarged with them
-+    if (isX11OverrideRedirect()) {
++    static auto PUNSCALED = CConfigValue<Config::BOOL>("xwayland:unscaled_windows");
++    if (isX11OverrideRedirect() && *PUNSCALED) {
 +        if (const auto OWNER = x11UnscaledOwner(); OWNER && OWNER->m_xwaylandSurface)
 +            return OWNER->m_realPosition->goal() + (pos - OWNER->m_xwaylandSurface->m_geometry.pos());
 +    }
@@ -356,7 +357,7 @@ index 8836f73..0d2a37b 100644
  }
  
  void CWindow::sendWindowSize(bool force) {
-@@ -2546,11 +2593,8 @@ void CWindow::mapWindow() {
+@@ -2546,11 +2594,8 @@ void CWindow::mapWindow() {
      if (m_workspace)
          m_workspace->updateWindows();
  
@@ -370,7 +371,7 @@ index 8836f73..0d2a37b 100644
  
      Event::bus()->m_events.window.openLate.emit(m_self.lock());
  }
-@@ -2854,12 +2898,9 @@ void CWindow::unmanagedSetGeometry() {
+@@ -2854,12 +2899,9 @@ void CWindow::unmanagedSetGeometry() {
          return;
      }
  
@@ -386,7 +387,7 @@ index 8836f73..0d2a37b 100644
  
      if (abs(std::floor(POS.x) - LOGICALPOS.x) > 2 || abs(std::floor(POS.y) - LOGICALPOS.y) > 2 || abs(std::floor(SIZ.x) - LOGICALGEOSIZE.x) > 2 ||
          abs(std::floor(SIZ.y) - LOGICALGEOSIZE.y) > 2) {
-@@ -2893,7 +2934,10 @@ std::optional<Vector2D> CWindow::minSize() {
+@@ -2893,7 +2935,10 @@ std::optional<Vector2D> CWindow::minSize() {
      if ((m_isX11 && !hasSizeHints) || (!m_isX11 && !hasTopLevel))
          return std::nullopt;
  
@@ -398,7 +399,7 @@ index 8836f73..0d2a37b 100644
  
      minSize = minSize.clamp({1, 1});
  
-@@ -2913,10 +2957,11 @@ std::optional<Vector2D> CWindow::maxSize() {
+@@ -2913,10 +2958,11 @@ std::optional<Vector2D> CWindow::maxSize() {
  
      Vector2D maxSize = m_isX11 ? Vector2D(m_xwaylandSurface->m_sizeHints->max_width, m_xwaylandSurface->m_sizeHints->max_height) : m_xdgSurface->m_toplevel->layoutMaxSize();
  
@@ -723,21 +724,23 @@ index f139af4..5e81959 100644
      if (m_resource->version() < OUTPUT_DONE_DEPRECATED_SINCE_VERSION)
          m_resource->sendDone();
 diff --git a/src/render/Renderer.cpp b/src/render/Renderer.cpp
-index 249f084..28ad1b7 100644
+index 249f084..60760d7 100644
 --- a/src/render/Renderer.cpp
 +++ b/src/render/Renderer.cpp
-@@ -671,7 +671,14 @@ void IHyprRenderer::renderWindow(PHLWINDOW pWindow, PHLMONITOR pMonitor, const T
+@@ -671,7 +671,16 @@ void IHyprRenderer::renderWindow(PHLWINDOW pWindow, PHLMONITOR pMonitor, const T
          }
  
          static auto PXWLUSENN = CConfigValue<Config::INTEGER>("xwayland:use_nearest_neighbor");
 -        if ((pWindow->m_isX11 && *PXWLUSENN) || pWindow->m_ruleApplicator->nearestNeighbor().valueOrDefault())
-+        // an X11 window drawn at another scale than the monitor's is filtered linearly unless each
-+        // of its pixels becomes a whole number of the monitor's: nearest neighbour would drop whole
-+        // rows of a window drawn at a higher scale (the one X11 scale for every monitor), and
-+        // double some rows and not others of one enlarged by 1.6 (an unscaled window)
++        static auto PXWLSCALE = CConfigValue<Config::FLOAT>("xwayland:scale");
++        // with xwayland:scale, an X11 window drawn at another scale than the monitor's is filtered
++        // linearly unless each of its pixels becomes a whole number of the monitor's: nearest
++        // neighbour would drop whole rows of a window drawn at a higher scale (the one X11 scale for
++        // every monitor), and double some rows and not others of one enlarged by 1.6 (an unscaled
++        // window). Without it, X11 is filtered as it always was.
 +        const float XWLBUFFERSCALE = pWindow->m_isX11 ? pWindow->x11PixelScale() : 1.F;
 +        const float XWLRATIO       = pMonitor->m_scale / XWLBUFFERSCALE;
-+        const bool  XWLRESAMPLED   = pWindow->m_isX11 && (XWLRATIO < 0.999F || std::abs(XWLRATIO - std::round(XWLRATIO)) > 0.001F);
++        const bool  XWLRESAMPLED   = pWindow->m_isX11 && *PXWLSCALE != 0.F && (XWLRATIO < 0.999F || std::abs(XWLRATIO - std::round(XWLRATIO)) > 0.001F);
 +        if ((pWindow->m_isX11 && *PXWLUSENN && !XWLRESAMPLED) || pWindow->m_ruleApplicator->nearestNeighbor().valueOrDefault())
              renderdata.useNearestNeighbor = true;
  
