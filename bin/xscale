@@ -184,7 +184,7 @@ is_ours() {
 }
 
 overlay_value() {
-  sed -n "s/^_xscale_$2=//p" "$ROOT/pkg/$1/overlay.bash" | head -1
+  sed -n "s/^_xscale_$2=//p" "$ROOT/pkg/$1/overlay.bash" | head -1 | tr -d '"'
 }
 
 # The version of xscale's build of NAME for the version Arch has
@@ -196,7 +196,7 @@ wanted_version() {
 }
 
 cmd_recipe() {
-  local name=${1:-} dir=${2:-} version log
+  local name=${1:-} dir=${2:-} version log patch
   [ -f "$ROOT/pkg/$name/overlay.bash" ] || die "recipe: hyprland or xorg-xwayland"
   [ -n "$dir" ] || die "recipe: say where to write it"
   # what is there is replaced, so it has to be an earlier recipe or nothing
@@ -211,7 +211,10 @@ cmd_recipe() {
     die "cannot fetch Arch's recipe for $name $version: $log"
   rm -rf "$dir/.git" "$dir/.SRCINFO"
   { echo; cat "$ROOT/pkg/$name/overlay.bash" "$ROOT/pkg/overlay.bash"; } >>"$dir/PKGBUILD"
-  cp "$ROOT/patches/$(overlay_value "$name" patch)" "$dir/"
+  # every patch the overlay may pick; it picks by the version it builds
+  for patch in $(overlay_value "$name" patches); do
+    cp "$ROOT/patches/$patch" "$dir/"
+  done
   # the source's signature is checked against the keys Arch's recipe ships
   # (keys/pgp), in a keyring of the recipe's own
   mkdir -m 700 "$dir/.gnupg"
