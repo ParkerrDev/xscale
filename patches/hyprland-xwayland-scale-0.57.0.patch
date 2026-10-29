@@ -282,7 +282,7 @@ index 561d21c..4b3229f 100644
          PHLWINDOWREF m_self;
  
 diff --git a/src/desktop/view/window/X11Backend.cpp b/src/desktop/view/window/X11Backend.cpp
-index 2dcbf18..c446dc4 100644
+index 2dcbf18..edae676 100644
 --- a/src/desktop/view/window/X11Backend.cpp
 +++ b/src/desktop/view/window/X11Backend.cpp
 @@ -270,7 +270,7 @@ SClientGeometry CX11Backend::geometry() const {
@@ -306,7 +306,7 @@ index 2dcbf18..c446dc4 100644
  }
  
  Vector2D CX11Backend::reportedSize() const {
-@@ -308,19 +305,76 @@ Vector2D CX11Backend::reportedSize() const {
+@@ -308,19 +305,96 @@ Vector2D CX11Backend::reportedSize() const {
  }
  
  CBox CX11Backend::clientToLogical(const CBox& box, PHLMONITOR preferredMonitor_) const {
@@ -356,20 +356,40 @@ index 2dcbf18..c446dc4 100644
 +    if (!*PUNSCALED || !SURFACE || !SURFACE->m_overrideRedirect || m_pid <= 0)
 +        return nullptr;
 +
-+    // of the app's windows that draw unscaled, the one this window lies in, or else any
-+    PHLWINDOW any;
++    // the window this menu or tooltip belongs to: the one it is transient for, through the menus it
++    // was opened from, or else the one of the app's windows it lies in or nearest to
++    auto parent = SURFACE->m_parent.lock();
++    for (size_t depth = 0; parent && parent->m_overrideRedirect && depth < 16; ++depth)
++        parent = parent->m_parent.lock();
++    if (parent && parent->m_overrideRedirect)
++        parent.reset();
++
++    const auto POS     = SURFACE->m_geometry.pos();
++    double     nearest = std::numeric_limits<double>::max();
++    PHLWINDOW  owner;
 +    for (auto const& w : Desktop::windowState()->windows()) {
 +        const auto X11   = w ? dc<const CX11Backend*>(&w->backend()) : nullptr;
 +        const auto OTHER = X11 ? X11->m_xwaylandSurface.lock() : nullptr;
-+        if (!OTHER || X11 == this || !w->mapped() || OTHER->m_overrideRedirect || X11->m_pid != m_pid)
++        if (!OTHER || X11 == this || !w->mapped() || OTHER->m_overrideRedirect)
 +            continue;
-+        if (!w->m_ruleApplicator || !w->m_ruleApplicator->xwaylandUnscaled().valueOrDefault())
++        if (parent) {
++            if (OTHER == parent) {
++                owner = w;
++                break;
++            }
 +            continue;
-+        if (OTHER->m_geometry.containsPoint(SURFACE->m_geometry.pos()))
-+            return w;
-+        any = w;
++        }
++        if (X11->m_pid != m_pid)
++            continue;
++        if (const auto DISTANCE = OTHER->m_geometry.closestPoint(POS).distance(POS); DISTANCE < nearest) {
++            nearest = DISTANCE;
++            owner   = w;
++        }
 +    }
-+    return any;
++
++    if (!owner || !owner->m_ruleApplicator || !owner->m_ruleApplicator->xwaylandUnscaled().valueOrDefault())
++        return nullptr;
++    return owner;
 +}
 +
 +Vector2D CX11Backend::clientToLogicalPos(const Vector2D& pos, PHLMONITOR monitor) const {
