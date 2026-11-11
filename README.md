@@ -21,7 +21,7 @@ X11 has one coordinate space and one DPI for all its clients, so under Wayland a
 curl -fsSL https://raw.githubusercontent.com/ParkerrDev/xscale/master/install.sh | bash
 ```
 
-> Omarchy 4 (Arch, Hyprland 0.56). It asks for sudo once, to put xscale's Hyprland and Xwayland in place of Arch's: Arch's own packages with one patch each, prebuilt by this repository's CI for the release Arch has. Log out and back in after it.
+> Omarchy 4 (Arch, Hyprland 0.56 and 0.57; built and run through 0.57.1). It asks for sudo once, to put xscale's Hyprland and Xwayland in place of Arch's: Arch's own packages with one patch each, prebuilt by this repository's CI for the release Arch has. Log out and back in after it.
 > `xscale uninstall` puts Arch's back and takes the rest away.
 
 ---
@@ -141,13 +141,21 @@ Some X11 apps draw at 1x whatever they are told (Steam's updater, old Xlib and S
 
 <br>
 
-Measured in a nested Hyprland with a monitor at 1.6 and a second at 1, with `tools/xprobe.c`, an X11 window for measuring sharpness, the pointer and the cursor:
+The original 0.56 measurements used a nested Hyprland with a monitor at 1.6 and a second at 1, with `tools/xprobe.c`, an X11 window for measuring sharpness, the pointer and the cursor:
 
 - X11 at `-2` (1.6) on the 1.6 monitor: a one-pixel checkerboard comes out exactly, 0 grey pixels out of 1.39 million.
 - X11 at `-1` (2), the default: an X11 window on the monitor at 1 is filtered down cleanly, with no rows dropped, and GTK 3 (zenity, Bambu Studio) and Qt 6 windows are the same size as the same apps on Wayland, on both monitors.
 - The pointer lands on the X11 pixel it is over, on either monitor, and the X11 cursor is the size of Hyprland's own, both for an app that draws it at the scale (GTK, Qt) and for one that draws it at `XCURSOR_SIZE` as it is (Steam, Chromium, Wine), with either Xwayland.
 - A 300x200 X11 window drawing at 1x, ruled `xwayland_unscaled`, is 300x200 logical pixels instead of 150x100; a popup it opens 20,30 X11 pixels inside it sits 20,30 logical pixels inside it. Switching the rule keeps the window's X11 size, so the app never sees a resize.
 - Hyprland's 275 unit tests pass, 5 of them new for this. A stock Hyprland with xscale's Xwayland, and xscale's Hyprland with a stock Xwayland, both behave as before.
+
+On 0.57.1, all four Omarchy package patches apply without fuzz and the full x86_64 compositor builds with hyprutils 0.14.3 and Aquamarine 0.16.0. Fresh nested runtime checks with stock Xwayland confirm:
+
+- An 800x600 X11 window at scale 2 stays 400x300 logical pixels when moved between monitors at 1.6 and 1; its X11 buffer remains 800x600.
+- Toggling `xwayland_unscaled` changes that window to 800x600 logical pixels and back. Its already-open 200x100 menu also changes from 100x50 to 200x100 and back, preserving its 40,60 X11-pixel offset as 20,30 or 40,60 logical pixels respectively.
+- Pointer motion to 300,250 logical pixels reaches 600,500 in X11. Setting `xwayland.unscaled_windows = false` and reloading disables the rule for both the window and its open menu.
+
+These 0.57.1 checks cover geometry, input and live rule changes; the checkerboard and cursor pixel measurements above are from 0.56.
 
 </details>
 

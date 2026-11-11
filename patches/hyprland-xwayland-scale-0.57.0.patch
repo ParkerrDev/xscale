@@ -1,4 +1,4 @@
-Add xwayland:scale, one scale for X11 clients on every monitor (0.57.0)
+Add xwayland:scale, one scale for X11 clients on every monitor
 
 X11 has one coordinate space and one DPI for all its clients, so an X11
 window cannot take the scale of the monitor it is on. X11 apps either render
@@ -28,7 +28,6 @@ its own size. Their members go last in their classes, so plugins built
 against Hyprland's headers before this keep their layout.
 
 From https://github.com/ParkerrDev/xscale.
-
 
 diff --git a/src/config/lua/bindings/LuaBindingsInternal.hpp b/src/config/lua/bindings/LuaBindingsInternal.hpp
 index 86750d4..910e9d1 100644
@@ -60,7 +59,7 @@ index 3ae9a54..885c0bc 100644
          else if (PROP == "no_blur")
              parsePropTrivial(PWINDOW->m_ruleApplicator->noBlur(), VAL);
 diff --git a/src/config/shared/monitor/MonitorRuleManager.cpp b/src/config/shared/monitor/MonitorRuleManager.cpp
-index 0cbe9fd..13f4c15 100644
+index dcb08f6..485c837 100644
 --- a/src/config/shared/monitor/MonitorRuleManager.cpp
 +++ b/src/config/shared/monitor/MonitorRuleManager.cpp
 @@ -175,7 +175,8 @@ void CMonitorRuleManager::ensureMonitorStatus() {
@@ -73,7 +72,7 @@ index 0cbe9fd..13f4c15 100644
          return;
  
      for (const auto& m : monsForRefresh) {
-@@ -192,6 +193,12 @@ void CMonitorRuleManager::ensureMonitorStatus() {
+@@ -199,6 +200,12 @@ void CMonitorRuleManager::ensureMonitorStatus() {
  
      State::monitorLayoutController()->arrange();
      State::monitorLayoutController()->checkOverlapsAndNotify();
@@ -244,7 +243,7 @@ index 14bf65a..668cf36 100644
  #include "../LayerSurface.hpp"
  #include "../Popup.hpp"
  #include "../Subsurface.hpp"
-@@ -1048,6 +1049,19 @@ void CWindow::sendWindowSize(bool force) {
+@@ -1048,6 +1049,33 @@ void CWindow::sendWindowSize(bool force) {
      m_target->sendWindowSize(force);
  }
  
@@ -256,9 +255,23 @@ index 14bf65a..668cf36 100644
 +void CWindow::onX11PixelScaleChanged(const Vector2D& x11Size) {
 +    if (m_ruleApplicator)
 +        m_ruleApplicator->m_x11UnscaledShown = x11Unscaled();
-+    if (m_backend->isX11() && isFloating() && x11Size.x > 1 && x11Size.y > 1)
-+        layoutTarget()->setPositionGlobal(CBox{m_realPosition->goal(), m_backend->clientToLogical(CBox{{}, x11Size}, m_monitor.lock()).size()});
++    if (m_backend->isX11() && isFloating() && x11Size.x > 1 && x11Size.y > 1) {
++        const auto box = m_backend->geometry().box;
++        const auto position = m_backend->traits().overrideRedirect ? box.pos() : m_realPosition->goal();
++        layoutTarget()->setPositionGlobal(CBox{position, m_backend->clientToLogical(CBox{{}, x11Size}, m_monitor.lock()).size()});
++    }
 +    sendWindowSize(true);
++
++    // Open menus inherit the owner's rule immediately, including when it is
++    // switched off. Their X11 pixel size and offset must survive the change.
++    if (!m_backend->isX11() || m_backend->traits().overrideRedirect)
++        return;
++    for (const auto& child : Desktop::windowState()->windows()) {
++        if (!child || !child->mapped() || !child->m_ruleApplicator || !child->backend().isX11() || !child->backend().traits().overrideRedirect)
++            continue;
++        if (child->x11Unscaled() != child->m_ruleApplicator->m_x11UnscaledShown)
++            child->onX11PixelScaleChanged(child->backend().reportedSize());
++    }
 +}
 +
  NContentType::eContentType CWindow::getContentType() {
