@@ -56,7 +56,7 @@ jobs:
           su builder -c 'makepkg --printsrcinfo' |
             awk '$1 ~ /^(make|check)?depends$/ { print $3 }' | sed 's/[<>=].*//' |
             xargs pacman -S --noconfirm --needed --asdeps
-          su builder -c 'GNUPGHOME=/tmp/recipe/.gnupg PKGDEST=/tmp/out makepkg --noconfirm'
+          su builder -c 'GNUPGHOME=/tmp/recipe/.gnupg PKGDEST=/tmp/out makepkg --config "$GITHUB_WORKSPACE/pkg/makepkg.conf" --noconfirm'
           cd /tmp/out
           sha256sum -- *.pkg.tar.zst >SHA256SUMS
           cat SHA256SUMS

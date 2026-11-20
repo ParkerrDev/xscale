@@ -262,7 +262,7 @@ build_one() {
   mkdir -p "$(dirname "$file")"
   echo "xscale: building $name $want, which takes a while (log: $dir.log)"
   local built=yes
-  (cd "$dir" && GNUPGHOME=$dir/.gnupg PKGDEST=$(dirname "$file") makepkg --force --cleanbuild >"$dir.log" 2>&1) || built=no
+  (cd "$dir" && GNUPGHOME=$dir/.gnupg PKGDEST=$(dirname "$file") makepkg --config "$ROOT/pkg/makepkg.conf" --force --cleanbuild >"$dir.log" 2>&1) || built=no
   # gpg may have started a daemon for that keyring
   GNUPGHOME=$dir/.gnupg gpgconf --kill all 2>/dev/null || true
   [ "$built" = yes ] || die "$name did not build: the end of $dir.log says why"

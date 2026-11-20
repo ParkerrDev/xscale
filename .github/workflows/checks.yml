@@ -17,17 +17,18 @@ jobs:
     steps:
       - name: Tools
         run: |
-          pacman -Syu --noconfirm --needed git base-devel shellcheck lua
+          pacman -Syu --noconfirm --needed git base-devel shellcheck lua python
           useradd -m builder
       - uses: actions/checkout@v4
       - name: Shell and Lua
         run: |
           shellcheck bin/xscale install.sh uninstall.sh hooks/post-update.sh session/uwsm-env
           luac -p hypr/xscale.lua
+          tests/hyprland-xwayland-reload.sh
       - name: The patches still fit Arch's recipes
         run: |
           chown -R builder .
           for name in xorg-xwayland hyprland; do
             su builder -c "bin/xscale recipe $name /tmp/recipe-$name"
-            su builder -c "cd /tmp/recipe-$name && GNUPGHOME=/tmp/recipe-$name/.gnupg makepkg --nobuild --nodeps"
+            su builder -c "cd /tmp/recipe-$name && GNUPGHOME=/tmp/recipe-$name/.gnupg makepkg --config \"$GITHUB_WORKSPACE/pkg/makepkg.conf\" --nobuild --nodeps"
           done

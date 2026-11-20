@@ -21,7 +21,7 @@ X11 has one coordinate space and one DPI for all its clients, so under Wayland a
 curl -fsSL https://raw.githubusercontent.com/ParkerrDev/xscale/master/install.sh | bash
 ```
 
-> Omarchy 4 (Arch, Hyprland 0.56 and 0.57; built and run through 0.57.1). It asks for sudo once, to put xscale's Hyprland and Xwayland in place of Arch's: Arch's own packages with one patch each, prebuilt by this repository's CI for the release Arch has. Log out and back in after it.
+> Omarchy 4 (Arch, Hyprland 0.56 and 0.57; built and run through 0.57.2; latest reload fix covered by a focused regression test). It asks for sudo once, to put xscale's Hyprland and Xwayland in place of Arch's: Arch's own packages with one patch each, prebuilt by this repository's CI for the release Arch has. Log out and back in after it.
 > `xscale uninstall` puts Arch's back and takes the rest away.
 
 ---
@@ -36,6 +36,8 @@ curl -fsSL https://raw.githubusercontent.com/ParkerrDev/xscale/master/install.sh
 1. **The protocol.** `xwayland_shell_v1` version 2 gains one event, `scale`, in which the compositor tells Xwayland the scale its X11 clients render at (times 120, as `wp_fractional_scale_v1` has it). [protocol/xwayland-shell-v1.xml](protocol/xwayland-shell-v1.xml)
 2. **Xwayland** ([patches/xwayland-rootless-scale.patch](patches/xwayland-rootless-scale.patch)), rootless, with that scale: lays the X11 screen out at the outputs' logical geometry times the scale, shows every surface at its buffer size divided by it (`wp_viewport`, so any window size and any fractional scale work), maps pointer, touch and tablet coordinates back, shows X11 cursors at their size divided by it, and passes XTest input to libei at logical coordinates. Without the event, or with a compositor that only knows version 1, nothing changes.
 3. **Hyprland** ([patches/hyprland-xwayland-scale.patch](patches/hyprland-xwayland-scale.patch) up to 0.56, [patches/hyprland-xwayland-scale-0.57.0.patch](patches/hyprland-xwayland-scale-0.57.0.patch) from 0.57.0): the option `xwayland:scale`, the one scale every X11 client renders at. Up to 0.56, with an Xwayland that binds version 2 it sends the scale and treats X11 surfaces like any other, and with a stock Xwayland it scales the X11 windows itself. From 0.57.0, which moved X11 windows into a class of their own, the package carries the patch offered to Omarchy, which always scales them itself, with any Xwayland. Either way an X11 cursor is never shown smaller than Hyprland's own: GTK and Qt draw theirs at `XCURSOR_SIZE` times the scale, while Chromium and Electron apps, Steam and Wine draw `XCURSOR_SIZE` as it is, and both come out the size of Hyprland's cursor. It also fixes X11 size hints (minimum and maximum sizes), which Hyprland before 0.57.0 took as logical sizes while they are X11 pixels, and adds the window rule `xwayland_unscaled` for apps that draw at 1x whatever they are told.
+
+Changing either `xwayland:scale` or `xwayland:force_zero_scaling` refreshes the cached X11 scale on reload, even when monitor rules are unchanged.
 
 ### The toolkits
 
