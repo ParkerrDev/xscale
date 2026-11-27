@@ -50,7 +50,14 @@ jobs:
         if: env.CHANNEL != ''
         run: |
           pkg/omarchy-channel.sh "$CHANNEL"
-          pacman -Syyuu --noconfirm
+          pacman -Syy
+          # only a channel with a Hyprland of its own is built, and only then
+          # is the container moved to that channel's snapshot of Arch, which
+          # can be weeks older than the image (packages split since then
+          # leave files a downgrade has to take over)
+          if [ "$(LC_ALL=C pacman -Si "$NAME" | awk '/^Repository / { print $3; exit }')" = omarchy ]; then
+            pacman -Suu --noconfirm --overwrite '*'
+          fi
       - name: Recipe
         id: recipe
         run: |
