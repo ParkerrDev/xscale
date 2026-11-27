@@ -12,9 +12,11 @@
 #                                                settings at every login
 #   ~/.config/uwsm/env.d/50-xscale               Steam's scale for the whole
 #                                                session, from its start
-#   ~/.config/omarchy/hooks/post-update.d/50-xscale.sh
+#   ~/.config/omarchy/hooks/post-update.d/40-xscale.sh
 #                                                xscale's packages back after an
-#                                                update brought Arch's
+#                                                update replaced them; 40, so it
+#                                                runs before the hooks that build
+#                                                plugins against Hyprland
 #
 # and adds a marked block of one line to the end of ~/.config/hypr/hyprland.lua.
 # Then `xscale install` puts xscale's Hyprland and Xwayland in place of Arch's
@@ -71,7 +73,10 @@ link() {
 
 link "$ROOT/bin/xscale" "$HOME/.local/bin/xscale"
 link "$ROOT/hypr/xscale.lua" "$CONFIG/hypr/xscale.lua"
-link "$ROOT/hooks/post-update.sh" "$CONFIG/omarchy/hooks/post-update.d/50-xscale.sh"
+# the hook was 50-xscale.sh, which ran after plugin hooks of the same number
+old_hook=$CONFIG/omarchy/hooks/post-update.d/50-xscale.sh
+if [ -L "$old_hook" ] && [ "$(readlink -f "$old_hook")" = "$ROOT/hooks/post-update.sh" ]; then rm -f "$old_hook"; fi
+link "$ROOT/hooks/post-update.sh" "$CONFIG/omarchy/hooks/post-update.d/40-xscale.sh"
 link "$ROOT/session/uwsm-env" "$CONFIG/uwsm/env.d/50-xscale"
 
 if [ -f "$HYPRLAND_LUA" ] && ! grep -q '^-- >>> xscale' "$HYPRLAND_LUA"; then

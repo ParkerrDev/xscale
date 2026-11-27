@@ -47,7 +47,9 @@ No toolkit needs a patch. At every login `xscale settings` tells X11 toolkits th
 
 `xscale recipe` fetches Arch's own recipe for the version Arch has, from Arch's packaging repository, and lays xscale's patch over it (`pkg/`): the patch goes on after Arch's `prepare()`, and the release number becomes Arch's plus `.N`. Nothing else of Arch's recipe changes, the sources' checksums and Xwayland's signature are checked as Arch checks them, and pacman gives Arch's package back at Arch's next release.
 
-The [packages workflow](.github/workflows/packages.yml) builds both once a day for whatever Arch has, attests them, and releases each as `NAME-VERSION` with a `SHA256SUMS`. `xscale install` downloads the release for the versions on your system and checks it; for a release Arch put out in the last day, before the workflow has run, it builds the package on your machine instead.
+Omarchy builds its own Hyprland on some channels, from its own recipe with patches of its own (boot splash hold, pointer and monitor fixes), in its `[omarchy]` repository ahead of Arch's. Where pacman takes Hyprland from there, `xscale recipe` starts from Omarchy's recipe instead: the one in [omacom/omarchy-pkgs](https://github.com/omacom/omarchy-pkgs) at the commit that made that version, with the same patch on after Omarchy's. An Omarchy Hyprland that carries `xwayland:scale` itself needs nothing from xscale and is kept as it is.
+
+The [packages workflow](.github/workflows/packages.yml) builds both once a day for whatever Arch has, and Hyprland for each Omarchy channel (stable, rc, edge) that builds its own, against that channel's snapshot of Arch. It attests them, and releases each as `NAME-VERSION` (`hyprland-omarchy-VERSION` for Omarchy's recipe) with a `SHA256SUMS`. `xscale install` downloads the release for the versions on your system and checks it; for a release Arch put out in the last day, before the workflow has run, it builds the package on your machine instead.
 
 </details>
 
@@ -82,7 +84,7 @@ xscale install                                   # the packages, when you are re
 
 ### Updates
 
-When Arch releases a new Hyprland or Xwayland, `omarchy update` installs Arch's in place of xscale's. The post-update hook then installs xscale's build of the new release, with the sudo the update already asked for. If sudo has closed, or the new release came out too recently to be prebuilt, it says to run `xscale install`, which builds it here if it has to.
+When Arch or Omarchy releases a new Hyprland or Xwayland, `omarchy update` installs theirs in place of xscale's. The post-update hook then installs xscale's build of the new release, with the sudo the update already asked for. If sudo has closed, or the new release came out too recently to be prebuilt, it says to run `xscale install`, which builds it here if it has to.
 
 Hyprland plugins are built against the installed Hyprland's headers (hyprpm does that), and xscale's Hyprland installs its headers like Arch's.
 
@@ -108,11 +110,12 @@ xscale status              what is installed, and what the running session does
 xscale install             xscale's Hyprland and Xwayland in place of Arch's (sudo pacman -U)
           --no-build       only a prebuilt package; never build here
           --noconfirm      ask pacman nothing
-xscale restore             Arch's own Hyprland and Xwayland back
+xscale check               the packages that do not scale X11 apps as installed
+xscale restore             the repositories' own Hyprland and Xwayland back
 xscale uninstall           restore, then take everything else away
 xscale settings            tell X11 toolkits the scale (run at every login)
 xscale build               build both packages here, install nothing
-xscale recipe NAME DIR     Arch's recipe for NAME with xscale's patch, in DIR
+xscale recipe NAME DIR     Arch's (or Omarchy's) recipe for NAME with xscale's patch, in DIR
 ```
 
 </details>
@@ -193,12 +196,12 @@ The change is written to go into wayland-protocols, Xwayland and Hyprland, so th
 <br>
 
 ```
-bin/xscale            status, install, restore, uninstall, settings, build, recipe
+bin/xscale            status, check, install, restore, uninstall, settings, build, recipe
 hypr/xscale.lua       xwayland:scale, the toolkit settings at login, unscaled apps
 hooks/post-update.sh  xscale's packages back after an update brought Arch's
 session/uwsm-env      Steam's scale for the whole session
 patches/              the Hyprland and Xwayland patches
-pkg/                  the overlay laid over Arch's recipes
+pkg/                  the overlay laid over the recipes; Omarchy's key and channel setup for CI
 protocol/             xwayland-shell-v1.xml, version 2
 tools/xprobe.c        an X11 window for measuring sharpness, pointer and cursor
 upstream/             the change as each project takes it

@@ -20,6 +20,7 @@ unlink_ours() {
 unlink_ours "$HOME/.local/bin/xscale"
 unlink_ours "$CONFIG/hypr/xscale.lua"
 unlink_ours "$CONFIG/omarchy/hooks/post-update.d/50-xscale.sh"
+unlink_ours "$CONFIG/omarchy/hooks/post-update.d/40-xscale.sh"
 unlink_ours "$CONFIG/uwsm/env.d/50-xscale"
 
 if [ -f "$HYPRLAND_LUA" ] && grep -q '^-- >>> xscale' "$HYPRLAND_LUA"; then

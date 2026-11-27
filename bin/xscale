@@ -2,13 +2,18 @@
 # xscale: X11 apps as sharp as Wayland ones, at the right size on every monitor.
 #
 #   xscale status      what is installed and what the running session does
-#   xscale install     put xscale's Hyprland and Xwayland in place of Arch's
-#                      (sudo pacman -U): this repository's prebuilt packages
-#                      for the release Arch has, or, when there are none yet,
-#                      built here. Then log out and back in.
+#   xscale install     put xscale's Hyprland and Xwayland in place of the
+#                      repositories' (sudo pacman -U): this repository's
+#                      prebuilt packages for the release pacman offers, or,
+#                      when there are none yet, built here. Where Omarchy
+#                      builds its own Hyprland, xscale's is Omarchy's recipe
+#                      with the patch, and an Omarchy Hyprland that has
+#                      xwayland:scale already is kept. Then log out and back in.
 #                        --no-build    never build here; fail instead
 #                        --noconfirm   ask pacman nothing
-#   xscale restore     put Arch's own Hyprland and Xwayland back
+#   xscale check       name each package that does not scale X11 apps as
+#                      installed; fails when there is one
+#   xscale restore     put the repositories' own Hyprland and Xwayland back
 #   xscale uninstall   restore, then take xscale's links away (uninstall.sh)
 #   xscale settings    tell X11 toolkits the scale they render at: the X
 #                      resources (Xft.dpi, Xcursor.size) and XSETTINGS (GTK),
@@ -16,8 +21,9 @@
 #                      hypr/xscale.lua
 #   xscale build       build xscale's Hyprland and Xwayland here, no install
 #   xscale recipe NAME DIR
-#                      Arch's recipe for NAME (hyprland or xorg-xwayland) at
-#                      the version Arch has, with xscale's patch, in DIR; says
+#                      the recipe for NAME (hyprland or xorg-xwayland) at the
+#                      version pacman offers (Arch's, or Omarchy's for an
+#                      Omarchy Hyprland), with xscale's patch, in DIR; says
 #                      the version it makes. Build it with
 #                      GNUPGHOME=DIR/.gnupg makepkg (the keys Arch's recipe
 #                      ships, for the source's signature)
@@ -34,6 +40,8 @@ CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/xscale
 STATE=${XDG_STATE_HOME:-$HOME/.local/state}/xscale
 # where the prebuilt packages are released
 REPO=${XSCALE_REPO:-ParkerrDev/xscale}
+# Omarchy's package recipes, for the Hyprland it builds itself
+OMARCHY_PKGS=${XSCALE_OMARCHY_PKGS:-https://github.com/omacom/omarchy-pkgs.git}
 PACKAGES=(xorg-xwayland hyprland)
 
 usage() {
@@ -183,6 +191,54 @@ is_ours() {
   [[ $1 =~ -[0-9]+\.[0-9]+$ ]]
 }
 
+# The repository pacman installs NAME from: the first that has it
+sync_repo() {
+  LC_ALL=C pacman -Si "$1" 2>/dev/null | awk '/^Repository / { sub(/^[^:]*: */, ""); print; exit }'
+}
+
+# Whose recipe xscale's NAME is built from: Omarchy's where Omarchy builds its
+# own Hyprland (its [omarchy] repository, with patches of its own), else Arch's
+recipe_source() {
+  if [ "$1" = hyprland ] && [ "$(sync_repo "$1")" = omarchy ]; then echo omarchy; else echo arch; fi
+}
+
+# The release xscale's NAME VERSION built from SOURCE's recipe is published as
+release_tag() {
+  if [ "$3" = omarchy ]; then echo "$1-omarchy-$2"; else echo "$1-$2"; fi
+}
+
+# Whether the Hyprland installed here has xwayland:scale already, as an
+# Omarchy build that carries the patch does
+hyprland_scales() {
+  local bin
+  bin=$(command -v Hyprland 2>/dev/null) || return 1
+  grep -qaF 'xwayland:unscaled_windows' "$bin"
+}
+
+# Who built the NAME installed here
+installed_origin() {
+  if is_ours "$(installed_version "$1")"; then
+    echo xscale
+  elif LC_ALL=C pacman -Qi "$1" 2>/dev/null | grep -q '^Packager .*@omarchy\.org'; then
+    echo Omarchy
+  else
+    echo Arch
+  fi
+}
+
+# Whether NAME as installed already scales X11 apps: xscale's build, or an
+# Omarchy Hyprland at least as new as the repositories' one that carries
+# xwayland:scale itself
+in_place() {
+  local name=$1 have sync
+  have=$(installed_version "$name")
+  [ -n "$have" ] || return 1
+  is_ours "$have" && return 0
+  [ "$name" = hyprland ] && [ "$(installed_origin "$name")" = Omarchy ] && hyprland_scales || return 1
+  sync=$(arch_version "$name")
+  [ -z "$sync" ] || [ "$(vercmp "$have" "$sync")" -ge 0 ]
+}
+
 overlay_value() {
   sed -n "s/^_xscale_$2=//p" "$ROOT/pkg/$1/overlay.bash" | head -1 | tr -d '"'
 }
@@ -204,12 +260,16 @@ cmd_recipe() {
   version=$(arch_version "$name")
   [ -n "$version" ] || die "pacman knows no $name"
   rm -rf "$dir"
-  # Arch tags each release in the package's own repository; an epoch's
-  # colon becomes a dash
-  log=$(git -c advice.detachedHead=false clone --quiet --depth 1 --branch "${version/:/-}" \
-    "https://gitlab.archlinux.org/archlinux/packaging/packages/$name.git" "$dir" 2>&1) ||
-    die "cannot fetch Arch's recipe for $name $version: $log"
-  rm -rf "$dir/.git" "$dir/.SRCINFO"
+  if [ "$(recipe_source "$name")" = omarchy ]; then
+    omarchy_recipe "$name" "$version" "$dir"
+  else
+    # Arch tags each release in the package's own repository; an epoch's
+    # colon becomes a dash
+    log=$(git -c advice.detachedHead=false clone --quiet --depth 1 --branch "${version/:/-}" \
+      "https://gitlab.archlinux.org/archlinux/packaging/packages/$name.git" "$dir" 2>&1) ||
+      die "cannot fetch Arch's recipe for $name $version: $log"
+    rm -rf "$dir/.git" "$dir/.SRCINFO"
+  fi
   { echo; cat "$ROOT/pkg/$name/overlay.bash" "$ROOT/pkg/overlay.bash"; } >>"$dir/PKGBUILD"
   # every patch the overlay may pick; it picks by the version it builds
   for patch in $(overlay_value "$name" patches); do
@@ -225,8 +285,47 @@ cmd_recipe() {
   echo "$version.$(overlay_value "$name" release)"
 }
 
+# omarchy_recipe NAME VERSION DIR: Omarchy's recipe for NAME at the commit of
+# omacom/omarchy-pkgs that made VERSION (its pkgver-pkgrel), in DIR
+omarchy_recipe() {
+  local name=$1 version=$2 dir=$3 src=$CACHE/omarchy-pkgs commit='' c recipe log
+  if [ -d "$src" ]; then
+    log=$(git -C "$src" fetch --quiet origin +master:master 2>&1) || die "cannot update Omarchy's recipes: $log"
+  else
+    mkdir -p "$CACHE"
+    log=$(git clone --quiet --bare --filter=blob:none --single-branch --branch master \
+      "$OMARCHY_PKGS" "$src" 2>&1) || die "cannot fetch Omarchy's recipes: $log"
+  fi
+  # the newest commit whose recipe makes that version; a few hundred at most
+  for c in $(git -C "$src" rev-list --max-count=300 master -- "pkgbuilds/$name/PKGBUILD"); do
+    recipe=$(git -C "$src" show "$c:pkgbuilds/$name/PKGBUILD" 2>/dev/null) || continue
+    if [ "$(recipe_version "$recipe")" = "$version" ]; then
+      commit=$c
+      break
+    fi
+  done
+  [ -n "$commit" ] || die "no recipe in Omarchy's repository makes $name $version"
+  mkdir -p "$dir"
+  git -C "$src" archive "$commit" "pkgbuilds/$name" | tar -x -C "$dir" --strip-components=2
+  rm -rf "$dir/.omarchy" "$dir/.SRCINFO"
+  # once Omarchy carries the setting, there is nothing to add
+  ! grep -q 'xwayland-scale' "$dir/PKGBUILD" ||
+    die "Omarchy's $name $version carries xwayland:scale already: install it as it is"
+}
+
+# The version a PKGBUILD's text makes: [epoch:]pkgver-pkgrel
+recipe_version() {
+  local epoch ver rel
+  epoch=$(sed -n 's/^epoch=//p' <<<"$1" | head -1)
+  ver=$(sed -n 's/^pkgver=//p' <<<"$1" | head -1)
+  rel=$(sed -n 's/^pkgrel=//p' <<<"$1" | head -1)
+  echo "${epoch:+$epoch:}$ver-$rel"
+}
+
 package_file() {
-  echo "$CACHE/packages/$1-$2/$1-$2-$(uname -m).pkg.tar.zst"
+  local tag
+  tag=$(release_tag "$1" "$2" "$(recipe_source "$1")")
+  echo "$CACHE/packages/$tag/$1-$2-$(uname -m).pkg.tar.zst"
 }
 
 # fetch NAME VERSION: xscale's NAME from this repository's release
@@ -236,7 +335,7 @@ fetch_one() {
   local name=$1 want=$2 file out url
   file=$(package_file "$name" "$want")
   out=$(dirname "$file")
-  url=https://github.com/$REPO/releases/download/$name-$want
+  url=https://github.com/$REPO/releases/download/$(release_tag "$name" "$want" "$(recipe_source "$name")")
   mkdir -p "$out"
   curl -fsSL --max-time 30 -o "$out/SHA256SUMS" "$url/SHA256SUMS" 2>/dev/null || return 1
   grep -q "  ${file##*/}\$" "$out/SHA256SUMS" || return 1
@@ -296,10 +395,14 @@ cmd_install() {
       echo "xscale: $name $want is in place"
       continue
     fi
+    if in_place "$name"; then
+      echo "xscale: $name $have is Omarchy's and has xwayland:scale itself"
+      continue
+    fi
     if is_ours "$have"; then have=${have%.*}; fi
     # A build for a newer Hyprland than the one here can need newer libraries
     [ -z "$have" ] || [ "$have" = "${want%.*}" ] ||
-      die "$name is $have here and ${want%.*} in Arch: update first (omarchy update), then xscale install"
+      die "$name is $have here and ${want%.*} in the repositories: update first (omarchy update), then xscale install"
     file=$(package_file "$name" "$want")
     if [ ! -s "$file" ] && ! fetch_one "$name" "$want"; then
       [ "$build" = yes ] || die "there is no prebuilt $name $want yet; xscale install builds it here"
@@ -317,6 +420,19 @@ cmd_install() {
   [ "${#files[@]}" -gt 0 ] || return 0
   sudo pacman -U --needed "${confirm[@]}" "${files[@]}"
   echo "xscale: installed. Log out and back in, and X11 apps are drawn at their monitors' scale."
+}
+
+# The packages that do not scale X11 apps as installed, one a line; fails
+# when there are any
+cmd_check() {
+  local name missing=0
+  for name in "${PACKAGES[@]}"; do
+    if ! in_place "$name"; then
+      echo "$name"
+      missing=1
+    fi
+  done
+  return "$missing"
 }
 
 cmd_restore() {
@@ -342,13 +458,21 @@ cmd_uninstall() {
 }
 
 cmd_status() {
-  local name have arch scale display
+  local name have base arch scale display
   for name in "${PACKAGES[@]}"; do
     have=$(installed_version "$name")
     arch=$(arch_version "$name")
     printf '%-14s %s' "$name" "${have:-not installed}"
-    if is_ours "$have"; then printf ' (xscale)'; else printf " (Arch's)"; fi
-    if [ -n "$arch" ] && [ "${have%.*}" != "$arch" ] && [ "$have" != "$arch" ]; then printf ', Arch has %s' "$arch"; fi
+    [ -z "$have" ] || printf " (%s's)" "$(installed_origin "$name")"
+    if [ "$name" = hyprland ] && [ -n "$have" ] && ! is_ours "$have"; then
+      if hyprland_scales; then printf ', with xwayland:scale'; else printf ', without xwayland:scale'; fi
+    fi
+    # a newer release waits in the repositories
+    base=$have
+    if is_ours "$have"; then base=${have%.*}; fi
+    if [ -n "$arch" ] && [ -n "$have" ] && [ "$(vercmp "$base" "$arch")" -lt 0 ]; then
+      printf ', %s has %s' "$(sync_repo "$name")" "$arch"
+    fi
     echo
   done
   if hyprctl version >/dev/null 2>&1; then
@@ -362,6 +486,7 @@ cmd_status() {
 
 case "${1:-}" in
   status) cmd_status ;;
+  check) cmd_check ;;
   install) shift; cmd_install "$@" ;;
   restore) cmd_restore ;;
   uninstall) cmd_uninstall ;;
